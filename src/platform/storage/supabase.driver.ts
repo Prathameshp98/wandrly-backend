@@ -25,8 +25,15 @@ export class SupabaseStorageDriver implements StorageDriver {
     return `${this.url}/storage/v1/${path}`;
   }
 
+  /**
+   * Both headers, deliberately. Supabase's gateway authenticates on `apikey`
+   * and Storage authorizes on `Authorization`. A legacy `service_role` JWT is
+   * accepted as either, but the newer `sb_secret_…` keys are not JWTs and are
+   * rejected when only the bearer is sent — so sending one header works with
+   * one key format and silently 401s with the other.
+   */
   private get headers(): Record<string, string> {
-    return { Authorization: `Bearer ${this.serviceKey}` };
+    return { apikey: this.serviceKey, Authorization: `Bearer ${this.serviceKey}` };
   }
 
   async put(key: string, body: Buffer, contentType: string): Promise<StoredObject> {
