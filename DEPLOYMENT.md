@@ -11,7 +11,7 @@ been done for you — the backend has run entirely offline until now.
 
 | You will need | Cost | Required? |
 |---|---|---|
-| GitHub account (repo + Actions) | Free | **Yes** |
+| GitHub account (repo + Actions) | Free | **Yes** — ✅ done, `Prathameshp98/wandrly-backend` |
 | Supabase account | Free tier | **Yes** — Postgres, Auth, Storage |
 | Koyeb account | Free tier | **Yes** — API hosting |
 | A domain | ~₹1,000/yr | No — Koyeb gives you a subdomain |
@@ -238,6 +238,11 @@ GitHub Actions workflow that runs `npm run db:migrate`.
 ---
 
 ## Step 5 — GitHub Actions
+
+> ✅ **Repository pushed** to `git@github.com:Prathameshp98/wandrly-backend.git`
+> (branch `main`). Verified that `.env`, `.env.test`, `node_modules/`,
+> `.storage/`, `dist/` and `coverage/` are excluded, and that no key, JWT, or
+> live connection string appears in any tracked file.
 
 ### 5.1 Repository secrets
 
