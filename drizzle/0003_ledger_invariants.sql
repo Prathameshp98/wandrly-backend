@@ -12,11 +12,25 @@
 -- UPDATE transiently collides on (variant_id, day_number), so the uniqueness
 -- must be deferred to commit time.
 
-DROP INDEX IF EXISTS days_variant_number_uq;
+-- Guarded so re-running this file is a no-op. `0000_schema.sql` creates a plain
+-- unique INDEX of this name; the constraint below replaces it and owns an index
+-- of the same name. On a second run an unguarded `DROP INDEX` therefore fails
+-- with "cannot drop index ... because constraint ... requires it" rather than
+-- doing nothing.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'days_variant_number_uq' AND condeferrable
+  ) THEN
+    ALTER TABLE days DROP CONSTRAINT IF EXISTS days_variant_number_uq;
+    DROP INDEX IF EXISTS days_variant_number_uq;
 
-ALTER TABLE days
-  ADD CONSTRAINT days_variant_number_uq
-  UNIQUE (variant_id, day_number) DEFERRABLE INITIALLY DEFERRED;
+    ALTER TABLE days
+      ADD CONSTRAINT days_variant_number_uq
+      UNIQUE (variant_id, day_number) DEFERRABLE INITIALLY DEFERRED;
+  END IF;
+END $$;
 
 -- ─────────────────────────────────────────────────────────────────────
 -- 2. The expense balance invariant  (FR-SPLIT-17, FR-SPLIT-18)
