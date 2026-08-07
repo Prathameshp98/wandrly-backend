@@ -62,6 +62,24 @@ const EnvSchema = z
     EMAIL_FROM: z.string().default('Wandrly <no-reply@wandrly.app>'),
     SENTRY_DSN: z.string().optional(),
     STORAGE_BUCKET: z.string().default('wandrly-media'),
+
+    /**
+     * S3-compatible object storage — Cloudflare R2, Backblaze B2, Wasabi,
+     * MinIO. Preferred over Supabase Storage when set: the free tiers are an
+     * order of magnitude larger (10 GB vs 1 GB) and egress is free or generous,
+     * which matters more than storage for an image-heavy app.
+     */
+    S3_ENDPOINT: z.string().url().optional(),
+    S3_REGION: z.string().default('auto'),
+    S3_ACCESS_KEY_ID: z.string().optional(),
+    S3_SECRET_ACCESS_KEY: z.string().optional(),
+    /** Public bucket domain. Absent ⇒ private bucket, reads via signed URLs. */
+    S3_PUBLIC_BASE_URL: z.string().url().optional(),
+    /** B2 and MinIO require path-style addressing; R2 tolerates it. */
+    S3_FORCE_PATH_STYLE: z
+      .enum(['true', 'false'])
+      .default('true')
+      .transform((value) => value === 'true'),
     UNSPLASH_ACCESS_KEY: z.string().optional(),
     /** Free tier: 200 req/hour, 20k/month, no approval needed. */
     PEXELS_API_KEY: z.string().optional(),
@@ -83,6 +101,28 @@ const EnvSchema = z
     LIMIT_MEDIA_BYTES_PER_USER: z.coerce.number().int().positive().default(100 * 1024 * 1024),
   })
   .superRefine((value, ctx) => {
+    // Partial S3 config is the dangerous case: two of three set means the
+    // driver is skipped and uploads land somewhere unintended, quietly.
+    const s3 = {
+      S3_ENDPOINT: value.S3_ENDPOINT,
+      S3_ACCESS_KEY_ID: value.S3_ACCESS_KEY_ID,
+      S3_SECRET_ACCESS_KEY: value.S3_SECRET_ACCESS_KEY,
+    };
+    const provided = Object.entries(s3).filter(([, v]) => Boolean(v));
+
+    if (provided.length > 0 && provided.length < 3) {
+      for (const [key, v] of Object.entries(s3)) {
+        if (!v) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message:
+              'S3 storage needs S3_ENDPOINT, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY together',
+            path: [key],
+          });
+        }
+      }
+    }
+
     if (!value.SUPABASE_JWT_SECRET && !value.SUPABASE_JWKS_URL) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

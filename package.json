@@ -1,7 +1,7 @@
 {
   "name": "wandrly-backend",
   "version": "0.1.0",
-  "description": "Wandrly API \u2014 collaborative trip planning canvas with a group expense ledger",
+  "description": "Wandrly API — collaborative trip planning canvas with a group expense ledger",
   "author": "Prathamesh Patil",
   "license": "UNLICENSED",
   "private": true,
@@ -32,6 +32,8 @@
   },
   "dependencies": {
     "@asteasolutions/zod-to-openapi": "^7.3.0",
+    "@aws-sdk/client-s3": "^3.1105.0",
+    "@aws-sdk/s3-request-presigner": "^3.1105.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "drizzle-orm": "^0.38.3",

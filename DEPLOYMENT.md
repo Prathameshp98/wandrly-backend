@@ -12,8 +12,9 @@ been done for you — the backend has run entirely offline until now.
 | You will need | Cost | Required? |
 |---|---|---|
 | GitHub account (repo + Actions) | Free | **Yes** — ✅ done, `Prathameshp98/wandrly-backend` |
-| Supabase account | Free tier | **Yes** — Postgres, Auth, Storage |
+| Supabase account | Free tier | **Yes** — Postgres and Auth |
 | Koyeb account | Free tier | **Yes** — API hosting |
+| Cloudflare R2 **or** Backblaze B2 | Free tier | Recommended — 10 GB vs Supabase's 1 GB (step 2.6) |
 | A domain | ~₹1,000/yr | No — Koyeb gives you a subdomain |
 | Pexels API key | Free, no approval | No — image search is inert without it |
 | Resend account | Free 3k/mo | No — emails are logged instead of sent |
@@ -158,6 +159,8 @@ is more reliable on a managed instance.)
 
 ### 2.5 Create the storage bucket
 
+**Skip this if you are using R2 or B2 — see step 2.6, and pick one.**
+
 **Storage → New bucket**:
 
 - Name: `wandrly-media`
@@ -165,6 +168,59 @@ is more reliable on a managed instance.)
   The API serves them through an authorization check.
 
 - [ ] Bucket `wandrly-media` created, set to private
+
+### 2.6 Choose where media lives
+
+Supabase's free tier is the tightest constraint in this whole stack:
+
+| | Storage | Egress / month | Card to sign up |
+|---|---|---|---|
+| Supabase Storage | **1 GB** | **5 GB** | No |
+| Cloudflare R2 | 10 GB | **Free, unmetered** | **Yes** |
+| Backblaze B2 | 10 GB | 30 GB (3× stored) | No |
+
+Egress binds before storage does. A single trip with 200 photos at 2 MB is
+400 MB; five people each loading that trip twice a month is 4 GB of egress
+against Supabase's 5 GB — the app slows to a stop while the bucket is still
+mostly empty.
+
+The driver is **S3-compatible, not R2-specific**, so R2, B2, Wasabi and MinIO
+all work with the same code. Switching later costs an endpoint and two keys.
+
+**Cloudflare R2** — best free tier, but Cloudflare requires a card on file
+before R2 activates. You are not charged inside the free allowance; if that is
+not acceptable, use B2, which needs no card.
+
+1. Cloudflare dashboard → **R2** → activate (card required)
+2. **Create bucket** → `wandrly-media`, keep it private
+3. **Manage R2 API Tokens** → create a token with **Object Read & Write**
+4. Note the **Account ID** — the endpoint is
+   `https://<account-id>.r2.cloudflarestorage.com`, region `auto`
+
+**Backblaze B2** — no card, slightly less egress headroom.
+
+1. Sign up → **Buckets → Create a Bucket** → `wandrly-media`, private
+2. **Application Keys → Add a New Application Key**, scoped to that bucket
+3. The endpoint is shown on the bucket as `s3.<region>.backblazeb2.com` —
+   prefix it with `https://` and set `S3_REGION` to that same region
+
+Then set, in `.env` locally and in Koyeb for production:
+
+```
+S3_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
+S3_ACCESS_KEY_ID=<access key id>
+S3_SECRET_ACCESS_KEY=<secret access key>
+S3_REGION=auto            # B2: the region in your endpoint, e.g. us-west-004
+S3_FORCE_PATH_STYLE=true
+```
+
+All three of endpoint, key id and secret must be set together — the app refuses
+to start on a partial config rather than quietly falling back somewhere else.
+Leave `S3_PUBLIC_BASE_URL` empty: the bucket stays private and reads go through
+short-lived signed URLs, which is what receipts need.
+
+- [ ] One of: Supabase bucket, R2 bucket, or B2 bucket created — and private
+- [ ] If S3: all three `S3_*` credentials set together
 
 ---
 
@@ -232,7 +288,7 @@ DATABASE_POOL_MAX=5
 SUPABASE_JWKS_URL=https://<ref>.supabase.co/auth/v1/.well-known/jwks.json
 # SUPABASE_JWT_SECRET=<only for legacy shared-secret projects>
 SUPABASE_URL=<from step 2.2>
-SUPABASE_SERVICE_KEY=<from step 2.2>
+SUPABASE_SERVICE_KEY=<from step 2.2 — only if using Supabase Storage>
 
 ENCRYPTION_KEY=<from step 1>
 CRON_SECRET=<from step 1>
@@ -241,6 +297,13 @@ CORS_ORIGINS=<your frontend origin — comma-separated>
 PUBLIC_BASE_URL=https://<your-koyeb-url>
 
 STORAGE_BUCKET=wandrly-media
+# Media storage — set these three if using R2 or B2 (step 2.6).
+# Omit all three to fall back to Supabase Storage.
+S3_ENDPOINT=<from step 2.6>
+S3_ACCESS_KEY_ID=<from step 2.6>
+S3_SECRET_ACCESS_KEY=<from step 2.6>
+S3_REGION=auto
+S3_FORCE_PATH_STYLE=true
 ```
 
 **Only four of these are actually mandatory** — the app validates at boot and
@@ -442,10 +505,15 @@ untested backup is a hope, not a backup.
 |---|---|
 | Koyeb free instance | ₹0 |
 | Supabase free tier | ₹0 |
+| Cloudflare R2 or Backblaze B2 free tier | ₹0 |
 | GitHub Actions | ₹0 |
 | Pexels / Resend / Sentry free tiers | ₹0 |
 | **Total** | **₹0** |
 | Domain (optional) | ~₹1,000/year |
 
-Watch **Supabase Storage (1 GB)** first — it is the tier most likely to fill. See
-TECHNICAL_DESIGN §18 for what to do when each limit is reached.
+R2 requires a card on file to activate, though nothing is charged inside the
+free allowance. B2 requires no card. Neither is billed at this scale.
+
+With media on R2 or B2, the binding limit becomes **Supabase's 500 MB database**
+rather than storage — roughly 100k expense rows, far past where this app is
+going. See TECHNICAL_DESIGN §18 for what to do when each limit is reached.
