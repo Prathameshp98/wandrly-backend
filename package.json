@@ -27,6 +27,7 @@
     "db:seed": "tsx src/platform/db/seed.ts",
     "openapi": "tsx src/contracts/generate-openapi.ts",
     "token:dev": "tsx scripts/dev-token.ts",
+    "storage:check": "tsx scripts/storage-check.ts",
     "test:api": "vitest run test/api",
     "db:reset": "tsx src/platform/db/migrate.ts && tsx src/platform/db/seed.ts"
   },

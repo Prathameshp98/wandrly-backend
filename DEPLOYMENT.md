@@ -219,6 +219,17 @@ to start on a partial config rather than quietly falling back somewhere else.
 Leave `S3_PUBLIC_BASE_URL` empty: the bucket stays private and reads go through
 short-lived signed URLs, which is what receipts need.
 
+**Then verify them before deploying:**
+
+```bash
+npm run storage:check
+```
+
+It does a real upload → download → signed URL → delete against the bucket, and
+names the likely cause when a step fails. Credentials that parse are not
+credentials that work: a token scoped to the wrong bucket or missing Object
+Read & Write passes every startup check and fails on the first photo.
+
 - [ ] One of: Supabase bucket, R2 bucket, or B2 bucket created — and private
 - [ ] If S3: all three `S3_*` credentials set together
 
