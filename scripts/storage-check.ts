@@ -73,6 +73,25 @@ function hintFor(error: Error): string {
   return '    Check S3_ENDPOINT, the key pair, and that the bucket exists.';
 }
 
+/**
+ * Does the S3 endpoint serve this object without a signature?
+ *
+ * Only covers the endpoint we talk to. A bucket can also be exposed through a
+ * separate hostname — R2's `r2.dev` development URL, or a custom domain — which
+ * is invisible from the S3 API and has to be checked in the dashboard.
+ */
+async function isPubliclyReadable(signedUrl: string | null): Promise<boolean> {
+  if (!signedUrl || env.S3_PUBLIC_BASE_URL) return false;
+
+  try {
+    const naked = signedUrl.split('?')[0];
+    if (!naked) return false;
+    return (await fetch(naked, { signal: AbortSignal.timeout(15_000) })).ok;
+  } catch {
+    return false;
+  }
+}
+
 async function readsButCannotWrite(writeError: unknown): Promise<boolean> {
   const text = `${(writeError as Error)?.message ?? ''} ${(writeError as { Code?: string })?.Code ?? ''}`;
   if (!/AccessDenied|403/i.test(text)) return false;
@@ -129,12 +148,16 @@ async function main(): Promise<void> {
     fail('download', error);
   }
 
+  let signedUrl: string | null = null;
   try {
-    const url = await storage.urlFor(KEY, 300);
-    ok(`signed URL (${new URL(url).host})`);
+    signedUrl = await storage.urlFor(KEY, 300);
+    const expiring = signedUrl.includes('X-Amz-Expires');
+    ok(`${expiring ? 'signed' : 'public'} URL (${new URL(signedUrl).host})`);
   } catch (error) {
     fail('signed URL', error);
   }
+
+  const exposed = await isPubliclyReadable(signedUrl);
 
   try {
     await storage.delete(KEY);
@@ -145,6 +168,24 @@ async function main(): Promise<void> {
     fail('delete', error);
   }
 
+  if (exposed) {
+    process.stdout.write(
+      '\n[31m[1mStorage works, but the bucket is PUBLIC.[0m\n' +
+        '\n  An object was fetched with the signature stripped off, so anything\n' +
+        '  uploaded — receipts included — is readable by anyone with the URL, and\n' +
+        '  the expiry on our signed URLs means nothing.\n' +
+        '\n  Cloudflare → R2 → your bucket → Settings → Public Development URL\n' +
+        '  → disable. Then re-run this check.\n\n',
+    );
+    process.exit(1);
+  }
+
+  ok('S3 endpoint rejects unsigned reads');
+  process.stdout.write(
+    '\n  Not a proof of privacy: a public r2.dev URL or custom domain serves\n' +
+      '  objects on a different hostname and is invisible from here. Confirm\n' +
+      '  Public Development URL is disabled in the Cloudflare bucket settings.\n',
+  );
   process.stdout.write('\n[32mStorage is working.[0m\n\n');
 }
 
