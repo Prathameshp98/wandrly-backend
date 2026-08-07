@@ -71,14 +71,33 @@ Keep both somewhere safe. You will paste them into Koyeb in Step 4.
 
 ### 2.2 Collect four values
 
-From **Project Settings**:
+Replace `<ref>` with your project ref — the subdomain in your dashboard URL
+(`supabase.com/dashboard/project/<ref>`).
 
-| Value | Where | Goes into |
+| Value | Where to click | Goes into |
 |---|---|---|
-| Connection string | Database → Connection string → **URI** | `DATABASE_URL` |
-| JWT Secret | API → JWT Settings | `SUPABASE_JWT_SECRET` |
-| Project URL | API → Project URL | `SUPABASE_URL` |
-| `service_role` key | API → Project API keys | `SUPABASE_SERVICE_KEY` |
+| Connection string | **Connect** button in the top bar → **Session pooler** tab | `DATABASE_URL` |
+| Project URL | Settings → **API Keys** — it is just `https://<ref>.supabase.co` | `SUPABASE_URL` |
+| `service_role` key | Settings → **API Keys** → reveal `service_role` | `SUPABASE_SERVICE_KEY` |
+| Token verification key | see the box below — **which one depends on your project** | `SUPABASE_JWKS_URL` *or* `SUPABASE_JWT_SECRET` |
+
+> ⚠️ **Check which signing scheme your project uses before copying anything.**
+> Supabase changed the default: projects created from 2025 onward sign tokens
+> with **asymmetric keys** (ES256) and have **no JWT secret to copy**. Older
+> projects use a shared HS256 secret. Run this — it needs no credentials:
+>
+> ```bash
+> curl -s https://<ref>.supabase.co/auth/v1/.well-known/jwks.json
+> ```
+>
+> | Result | Your project is | Set this |
+> |---|---|---|
+> | `{"keys":[{…}]}` — one or more keys | Asymmetric (ES256/RS256) | `SUPABASE_JWKS_URL=https://<ref>.supabase.co/auth/v1/.well-known/jwks.json` |
+> | `{"keys":[]}` — empty | Legacy shared secret | `SUPABASE_JWT_SECRET=` from Settings → API Keys → JWT Settings |
+>
+> Set **one** of the two, not both. `SUPABASE_JWT_SECRET` takes precedence if
+> both are present, so a stale secret alongside a JWKS URL silently sends every
+> token down the wrong verification path.
 
 > ⚠️ **Use the SESSION POOLER on port 5432.** There are three options in the
 > dashboard and only one is correct:
@@ -103,6 +122,7 @@ From **Project Settings**:
 
 - [ ] All four values collected
 - [ ] Using the **Session pooler** host on port **5432** (not the direct host, not 6543)
+- [ ] JWKS endpoint checked, and **exactly one** of `SUPABASE_JWKS_URL` / `SUPABASE_JWT_SECRET` set
 
 ### 2.3 Enable extensions
 
@@ -208,7 +228,9 @@ TRUST_PROXY=1
 DATABASE_URL=<from step 2.2>
 DATABASE_POOL_MAX=5
 
-SUPABASE_JWT_SECRET=<from step 2.2>
+# ONE of these two — see step 2.2. Asymmetric projects use the JWKS URL.
+SUPABASE_JWKS_URL=https://<ref>.supabase.co/auth/v1/.well-known/jwks.json
+# SUPABASE_JWT_SECRET=<only for legacy shared-secret projects>
 SUPABASE_URL=<from step 2.2>
 SUPABASE_SERVICE_KEY=<from step 2.2>
 

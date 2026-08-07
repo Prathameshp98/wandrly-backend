@@ -6,6 +6,8 @@
  * delegate *authorization* to Supabase — that is the policy engine's job.
  */
 
+import { createPublicKey, type KeyObject } from 'node:crypto';
+
 import jwt, { type JwtPayload } from 'jsonwebtoken';
 
 import { env } from '../config/env';
@@ -21,18 +23,53 @@ export interface VerifiedToken {
 }
 
 interface JwksKey {
-  kid: string;
-  kty: string;
+  kid?: string;
+  kty?: string;
   alg?: string;
+  crv?: string;
   n?: string;
   e?: string;
+  x?: string;
+  y?: string;
   x5c?: string[];
 }
 
 /** Simple JWKS cache. One instance, low traffic — a Map is the right tool. */
-const jwksCache = new Map<string, string>();
+const jwksCache = new Map<string, KeyObject>();
 let jwksFetchedAt = 0;
 const JWKS_TTL_MS = 10 * 60 * 1000;
+
+/** Floor between out-of-band refetches triggered by an unrecognised `kid`. */
+let lastForcedRefreshAt = 0;
+const FORCED_REFRESH_MIN_INTERVAL_MS = 60 * 1000;
+
+/**
+ * Turn one JWKS entry into a verification key.
+ *
+ * Supabase publishes *bare* JWKs — an ES256 key is `{kty:'EC', crv:'P-256', x,
+ * y}` with no `x5c` member. An earlier version of this read only `x5c`, so every
+ * key was skipped and every token rejected as "unrecognised signing key". Node
+ * imports a bare JWK directly; `x5c` stays as a fallback for providers that
+ * publish certificate chains instead.
+ */
+function toKeyObject(key: JwksKey): KeyObject | null {
+  try {
+    if (key.kty === 'EC' || key.kty === 'RSA' || key.kty === 'OKP') {
+      // Node validates the JWK and ignores non-cryptographic members
+      // (`use`, `key_ops`, `ext`, `kid`), which Supabase does include.
+      return createPublicKey({ key: key as never, format: 'jwk' });
+    }
+
+    const cert = key.x5c?.[0];
+    if (cert) {
+      return createPublicKey(`-----BEGIN CERTIFICATE-----\n${cert}\n-----END CERTIFICATE-----`);
+    }
+  } catch (error) {
+    log.warn({ err: error, kid: key.kid, kty: key.kty }, 'unusable JWKS entry, skipping');
+  }
+
+  return null;
+}
 
 async function loadJwks(): Promise<void> {
   if (!env.SUPABASE_JWKS_URL) return;
@@ -45,15 +82,23 @@ async function loadJwks(): Promise<void> {
   }
 
   const { keys } = (await response.json()) as { keys: JwksKey[] };
-  jwksCache.clear();
 
-  for (const key of keys) {
-    const cert = key.x5c?.[0];
-    if (key.kid && cert) {
-      jwksCache.set(key.kid, `-----BEGIN CERTIFICATE-----\n${cert}\n-----END CERTIFICATE-----`);
-    }
+  // Build into a fresh Map so a malformed response cannot empty a working
+  // cache — rotation should replace keys, never leave us with none.
+  const next = new Map<string, KeyObject>();
+  for (const key of keys ?? []) {
+    if (!key.kid) continue;
+    const publicKey = toKeyObject(key);
+    if (publicKey) next.set(key.kid, publicKey);
   }
 
+  if (next.size === 0) {
+    log.error({ received: keys?.length ?? 0 }, 'JWKS had no usable keys, keeping cache');
+    return;
+  }
+
+  jwksCache.clear();
+  for (const [kid, publicKey] of next) jwksCache.set(kid, publicKey);
   jwksFetchedAt = Date.now();
 }
 
@@ -92,7 +137,18 @@ export async function verifyAccessToken(token: string): Promise<VerifiedToken> {
 
     const decoded = jwt.decode(token, { complete: true });
     const kid = decoded?.header.kid;
-    const publicKey = kid ? jwksCache.get(kid) : undefined;
+    let publicKey = kid ? jwksCache.get(kid) : undefined;
+
+    // An unknown kid usually means Supabase rotated its signing key inside our
+    // TTL. Refetch rather than rejecting valid tokens for ten minutes — but at
+    // most once a minute, so forged tokens carrying random kids cannot turn
+    // this into a fetch amplifier aimed at the JWKS endpoint.
+    if (!publicKey && kid && Date.now() - lastForcedRefreshAt > FORCED_REFRESH_MIN_INTERVAL_MS) {
+      lastForcedRefreshAt = Date.now();
+      jwksFetchedAt = 0;
+      await loadJwks();
+      publicKey = jwksCache.get(kid);
+    }
 
     if (!publicKey) throw new InvalidTokenError('Unrecognised token signing key');
 

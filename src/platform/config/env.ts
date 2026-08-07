@@ -94,8 +94,26 @@ const EnvSchema = z
 
 export type Env = z.infer<typeof EnvSchema>;
 
+/**
+ * Treat a blank value as absent.
+ *
+ * `.env` files and hosting dashboards (Koyeb, GitHub Actions) both spell "not
+ * configured" as an empty string, but Zod sees `''` as a present value — so
+ * `SUPABASE_URL=` fails `.url()` instead of falling through to `.optional()`,
+ * and the process exits at boot. Every optional integration here is meant to
+ * degrade quietly when unset; stripping blanks makes that true for both
+ * spellings of "unset".
+ */
+function withoutBlanks(source: NodeJS.ProcessEnv): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (value !== undefined && value.trim() !== '') result[key] = value;
+  }
+  return result;
+}
+
 function loadEnv(): Env {
-  const parsed = EnvSchema.safeParse(process.env);
+  const parsed = EnvSchema.safeParse(withoutBlanks(process.env));
 
   if (!parsed.success) {
     const issues = parsed.error.issues
