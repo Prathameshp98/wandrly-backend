@@ -242,17 +242,27 @@ psql "<your supabase URI>" -c "
   SELECT tgname FROM pg_trigger WHERE NOT tgisinternal ORDER BY tgname;"
 ```
 
-You should see **three** triggers:
+You should see **three** triggers in the `public` schema:
 - `trg_shares_balanced`
 - `trg_payments_balanced`
 - `trg_activity_append_only`
 
-If those are missing, the database is not enforcing that expense splits balance,
-and a bug could persist a wrong number. Do not proceed without them.
+Supabase adds its own triggers on `storage.buckets` and `storage.objects`;
+filter on `nspname = 'public'` to see only ours.
 
-- [ ] Migrations applied
-- [ ] All three triggers present
-- [ ] `SELECT count(*) FROM information_schema.tables WHERE table_schema='public'` returns **27**
+If those three are missing, the database is not enforcing that expense splits
+balance, and a bug could persist a wrong number. Do not proceed without them.
+
+**The table count is the check that matters most.** 27 is correct; 25 means the
+hand-written migrations after the generated schema did not run, and image search
+and geocoding will fail at runtime on a missing relation. Migrations are
+idempotent — re-running is safe and is the fix.
+
+- [x] Migrations applied — **done 2026-08-08, against `jwanruyoqxdvakvheqvq`**
+- [x] All three triggers present
+- [x] Table count returns **27**
+- [x] `citext` and `pgcrypto` present (created by `0001`, no manual step needed)
+- [x] Re-run verified clean — migrations are idempotent
 
 ---
 
