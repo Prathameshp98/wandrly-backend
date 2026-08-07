@@ -43,12 +43,16 @@ Keep both somewhere safe. You will paste them into Koyeb in Step 4.
 
 - [x] `ENCRYPTION_KEY` generated — 64 hex chars, validated against the env schema
 - [x] `CRON_SECRET` generated — 48 hex chars
-- [ ] **Both copied into a password manager**
-- [ ] **`.secrets.local` deleted** once they are safely stored
+- [x] Both stored in the local `.env` (gitignored, verified)
 
-> Generated into `.secrets.local` (chmod 600, gitignored). That file is a
-> staging post, not storage — move the values to a password manager and delete
-> it.
+> ⚠️ **`.env` is a working file, not a backup.** It lives on one machine and is
+> excluded from git by design, so nothing else has a copy. `ENCRYPTION_KEY` is
+> unrecoverable — if that machine is lost after real data has been encrypted
+> with it, every booking confirmation, PNR, seat number and payout detail
+> becomes permanently unreadable.
+>
+> Copy it somewhere durable before Step 4. Until anything is deployed there is
+> no risk, and regenerating is two commands.
 
 ---
 
