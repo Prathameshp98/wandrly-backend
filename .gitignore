@@ -8,3 +8,6 @@ coverage/
 .DS_Store
 .vitest-cache/
 .storage/
+
+# Generated production secrets — never commit
+.secrets.local
