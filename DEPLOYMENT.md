@@ -41,8 +41,14 @@ openssl rand -hex 24     # → CRON_SECRET
 
 Keep both somewhere safe. You will paste them into Koyeb in Step 4.
 
-- [ ] `ENCRYPTION_KEY` generated and saved to a password manager
-- [ ] `CRON_SECRET` generated and saved
+- [x] `ENCRYPTION_KEY` generated — 64 hex chars, validated against the env schema
+- [x] `CRON_SECRET` generated — 48 hex chars
+- [ ] **Both copied into a password manager**
+- [ ] **`.secrets.local` deleted** once they are safely stored
+
+> Generated into `.secrets.local` (chmod 600, gitignored). That file is a
+> staging post, not storage — move the values to a password manager and delete
+> it.
 
 ---
 
