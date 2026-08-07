@@ -73,6 +73,18 @@ function hintFor(error: Error): string {
   return '    Check S3_ENDPOINT, the key pair, and that the bucket exists.';
 }
 
+async function readsButCannotWrite(writeError: unknown): Promise<boolean> {
+  const text = `${(writeError as Error)?.message ?? ''} ${(writeError as { Code?: string })?.Code ?? ''}`;
+  if (!/AccessDenied|403/i.test(text)) return false;
+
+  try {
+    await storage.get('_probe_nonexistent');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function main(): Promise<void> {
   process.stdout.write(`\nStorage driver: [1m${storage.name}[0m\n`);
 
@@ -93,6 +105,18 @@ async function main(): Promise<void> {
     const stored = await storage.put(KEY, BODY, 'text/plain');
     ok(`upload (${stored.size} bytes)`);
   } catch (error) {
+    // A denied write with a working read is a read-only token, not bad keys —
+    // worth separating, because the fixes are different.
+    if (await readsButCannotWrite(error)) {
+      process.stdout.write('  \x1b[31m✗\x1b[0m upload — \x1b[1mtoken is read-only\x1b[0m\n');
+      process.stdout.write(
+        '\n    Reads succeed, writes are denied. The R2 API token was created\n' +
+          '    with Object Read, not Object Read & Write.\n\n' +
+          '    Cloudflare → R2 → Manage R2 API Tokens → edit the token (or create\n' +
+          '    a new one) with "Object Read & Write", then update the key pair.\n\n',
+      );
+      process.exit(1);
+    }
     fail('upload', error);
   }
 
