@@ -1,0 +1,21 @@
+# Local development only. Production is one Koyeb container + Supabase Postgres.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: wandrly-postgres
+    environment:
+      POSTGRES_USER: wandrly
+      POSTGRES_PASSWORD: wandrly
+      POSTGRES_DB: wandrly
+    ports:
+      - '5432:5432'
+    volumes:
+      - wandrly-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U wandrly -d wandrly']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  wandrly-pgdata:
