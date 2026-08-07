@@ -80,16 +80,29 @@ From **Project Settings**:
 | Project URL | API → Project URL | `SUPABASE_URL` |
 | `service_role` key | API → Project API keys | `SUPABASE_SERVICE_KEY` |
 
-> ⚠️ **Use the DIRECT connection (port 5432), not the transaction pooler
-> (6543).** This is a long-running server with its own connection pool. The
-> transaction pooler breaks prepared statements and session-level behaviour, and
-> the ledger relies on real transactions with deferred constraint triggers.
+> ⚠️ **Use the SESSION POOLER on port 5432.** There are three options in the
+> dashboard and only one is correct:
+>
+> | Option | IPv4? | Mode | Use it? |
+> |---|---|---|---|
+> | **Session pooler** — `aws-N-<region>.pooler.supabase.com:5432` | ✅ | Session | ✅ **yes** |
+> | Direct — `db.<ref>.supabase.co:5432` | ❌ **IPv6-only** | Session | Only if your host has IPv6 egress |
+> | Transaction pooler — `…pooler…:6543` | ✅ | Transaction | ❌ breaks prepared statements |
+>
+> Supabase moved direct connections to **IPv6-only** in 2024 (verified: the
+> direct host publishes an AAAA record and no A record). Koyeb does not document
+> outbound IPv6, so relying on it is a gamble. The session pooler is IPv4 *and*
+> session-mode, which is what a long-running server with real transactions and
+> deferred constraint triggers needs.
+>
+> Note the pooler changes the username: **`postgres.<project-ref>`**, not
+> `postgres`.
 >
 > ⚠️ **`service_role` bypasses row-level security.** It is a server-only secret.
 > Never put it anywhere a browser can reach.
 
 - [ ] All four values collected
-- [ ] Confirmed the connection string uses port **5432**
+- [ ] Using the **Session pooler** host on port **5432** (not the direct host, not 6543)
 
 ### 2.3 Enable extensions
 
@@ -365,9 +378,11 @@ assuming.
 **Direct connection vs pooler.** If you see odd prepared-statement errors, check
 you are on port 5432 and not 6543.
 
-**IPv6.** Supabase direct connections may be IPv6-only on the free tier. If Koyeb
-cannot reach the database, that is the likely cause — check whether Koyeb's
-egress supports IPv6, and use the pooler as a fallback only if you must.
+**IPv6 — confirmed, not hypothetical.** Supabase direct connections resolve to
+IPv6 only. Verified for this project: `db.<ref>.supabase.co` has one AAAA record
+and zero A records. If you use the direct host and Koyeb has no IPv6 egress you
+get `ENETUNREACH`. Step 2.2 uses the IPv4 session pooler instead, which avoids
+the question entirely.
 
 **Free instances cold-start.** The first request after idle pays container start
 plus a database connect. The cron tick keeps it warm during active periods.
