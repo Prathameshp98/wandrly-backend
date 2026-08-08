@@ -137,7 +137,24 @@ publicRouter.get(
   async (req, res) => {
     const { slug } = validated.params(req, SlugParam);
     const { password } = validated.query(req, PasswordQuery);
-    res.json(await sharingService.resolve(slug, password));
+
+    try {
+      res.json(await sharingService.resolve(slug, password));
+    } catch (error) {
+      // The HTML twin answers 401 and offers the password form. Letting this
+      // one fall through to the error handler made the same condition a 403,
+      // which tells a client "never" where the truth is "supply the password".
+      if (error instanceof ForbiddenError) {
+        res.status(401).json({
+          error: {
+            code: 'PASSWORD_REQUIRED',
+            message: 'This link is password protected.',
+          },
+        });
+        return;
+      }
+      throw error;
+    }
   },
 );
 

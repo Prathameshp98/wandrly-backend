@@ -355,12 +355,25 @@ export class SharingService {
 
   async deleteGuestComment(slug: string, commentId: string, guestToken: string): Promise<void> {
     const rows = await db
-      .select({ tripId: shareLinks.tripId })
+      .select({
+        tripId: shareLinks.tripId,
+        isEnabled: shareLinks.isEnabled,
+        expiresAt: shareLinks.expiresAt,
+      })
       .from(shareLinks)
       .where(eq(shareLinks.slug, slug))
       .limit(1);
 
-    if (rows.length === 0) throw new NotFoundError('Page');
+    const link = rows[0];
+    if (!link) throw new NotFoundError('Page');
+
+    // A guest token is a capability scoped to this link, so revoking the link
+    // has to revoke the token with it. Checking only that the slug exists left
+    // guests editing through a link the owner had already turned off.
+    if (!link.isEnabled) throw new NotFoundError('Page');
+    if (link.expiresAt && link.expiresAt.getTime() < Date.now()) {
+      throw new NotFoundError('Page');
+    }
 
     const [comment] = await db
       .select({ guestTokenHash: comments.guestTokenHash })
