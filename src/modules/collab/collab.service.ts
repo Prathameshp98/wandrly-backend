@@ -129,7 +129,58 @@ export class CollabService {
    * Clear-then-set inside one transaction: `one_owner_per_trip` is a partial
    * unique index, so two owners must not exist even momentarily.
    */
+  private async countPendingInvites(exec: Executor, tripId: string): Promise<number> {
+    const rows = await exec
+      .select({ count: sql<number>`count(*)::int` })
+      .from(invites)
+      .where(and(eq(invites.tripId, tripId), eq(invites.status, 'PENDING')));
+    return rows[0]?.count ?? 0;
+  }
+
+  /**
+   * A claim may only ever target an unclaimed placeholder on this trip.
+   *
+   * 404 for "not on this trip" rather than 422, so an invite cannot be used to
+   * probe for participant ids on trips the sender has no access to.
+   */
+  private async requireClaimablePlaceholder(
+    exec: Executor,
+    tripId: string,
+    participantId: string,
+  ): Promise<void> {
+    const rows = await exec
+      .select({ userId: tripParticipants.userId, isActive: tripParticipants.isActive })
+      .from(tripParticipants)
+      .where(
+        and(
+          eq(tripParticipants.id, participantId),
+          eq(tripParticipants.tripId, tripId),
+        ),
+      )
+      .limit(1);
+
+    const participant = rows[0];
+    if (!participant) throw new NotFoundError('Participant');
+
+    if (participant.userId !== null) {
+      throw new DomainRuleError(
+        'That person already has an account on this trip, so their share cannot be claimed',
+      );
+    }
+
+    if (!participant.isActive) {
+      throw new DomainRuleError('That participant has been removed from this trip');
+    }
+  }
+
   async transferOwnership(access: TripAccess, toUserId: string) {
+    // A no-op in practice — the clear-then-set below would demote and re-promote
+    // the same person — but it writes an activity event claiming a handover
+    // that never happened.
+    if (toUserId === access.userId) {
+      throw new DomainRuleError('You are already the owner of this trip');
+    }
+
     await withTransaction(async (tx) => {
       const target = await tx
         .select({ userId: tripMembers.userId })
@@ -226,9 +277,25 @@ export class CollabService {
       .where(eq(users.id, access.userId))
       .limit(1);
 
-    const memberCount = await this.countMembers(db, access.tripId);
-    if (memberCount + input.emails.length > limits.membersPerTrip) {
+    // Pending invites count too. Checking members alone made the ceiling
+    // bypassable by simply inviting past it: nothing stopped 49 invites, then
+    // 49 more, then everybody accepting.
+    const [memberCount, pendingCount] = await Promise.all([
+      this.countMembers(db, access.tripId),
+      this.countPendingInvites(db, access.tripId),
+    ]);
+
+    if (memberCount + pendingCount + input.emails.length > limits.membersPerTrip) {
       throw new LimitExceededError('people on a trip', limits.membersPerTrip);
+    }
+
+    // `claimsParticipantId` decides whose ledger history the accepter inherits,
+    // and it arrives from the client. Unchecked, it was two attacks at once: a
+    // participant id from ANOTHER trip reassigned someone else's ledger
+    // identity in a trip the sender cannot even see, and an id belonging to an
+    // existing member handed their balances to whoever accepted.
+    if (input.claimsParticipantId) {
+      await this.requireClaimablePlaceholder(db, access.tripId, input.claimsParticipantId);
     }
 
     for (const email of input.emails) {
@@ -368,6 +435,14 @@ export class CollabService {
         throw new DuplicateError('You are already on this trip');
       }
 
+      // The real ceiling lives here rather than at send time: invites can be
+      // sent before other people accept, so this is the only point at which
+      // the membership count is final.
+      const memberCount = await this.countMembers(tx, invite.tripId);
+      if (memberCount >= limits.membersPerTrip) {
+        throw new LimitExceededError('people on a trip', limits.membersPerTrip);
+      }
+
       await tx.insert(tripMembers).values({
         tripId: invite.tripId,
         userId,
@@ -378,6 +453,15 @@ export class CollabService {
       // FR-SPLIT-03 — claiming a placeholder transfers their entire ledger
       // history onto this account, with no recomputation of balances.
       if (invite.claimsParticipantId) {
+        // Re-checked here as well as at send time: the placeholder can be
+        // claimed by someone else in between, and this is the moment the
+        // ledger history actually moves.
+        await this.requireClaimablePlaceholder(
+          tx,
+          invite.tripId,
+          invite.claimsParticipantId,
+        );
+
         await tx
           .update(tripParticipants)
           .set({
