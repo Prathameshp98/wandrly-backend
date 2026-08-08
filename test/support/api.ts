@@ -34,23 +34,44 @@ interface StatusAsserter {
 const prototype = supertest.Test.prototype as unknown as StatusAsserter;
 const originalAssertStatus = prototype._assertStatus;
 
-prototype._assertStatus = function _assertStatus(
-  this: StatusAsserter,
-  status: number,
-  res: supertest.Response,
-): Error | undefined {
-  const error = originalAssertStatus.call(this, status, res);
-  if (!error) return error;
+/**
+ * Patch once, however many times this module is evaluated.
+ *
+ * `isolate: true` gives every test file its own module registry, so this file
+ * runs once per file — but `supertest` resolves to one cached instance, so the
+ * prototype is shared. Without this guard each file wraps the previous wrapper
+ * and a failure in the twelfth file prints its diagnostic twelve times.
+ */
+const PATCHED = Symbol.for('wandrly.assertStatusPatched');
 
-  const body = res.body as Record<string, unknown> | undefined;
-  const detail =
-    body && Object.keys(body).length > 0
-      ? JSON.stringify(body)
-      : String(res.text ?? '').slice(0, 200) || '<empty body>';
+if (!(PATCHED in prototype)) {
+  Object.defineProperty(prototype, PATCHED, { value: true });
+  prototype._assertStatus = function _assertStatus(
+    this: StatusAsserter,
+    status: number,
+    res: supertest.Response,
+  ): Error | undefined {
+    const error = originalAssertStatus.call(this, status, res);
+    if (!error) return error;
 
-  error.message = `${error.message}\n  ${this.method ?? '?'} ${this.url ?? '?'}\n  body: ${detail}`;
-  return error;
-};
+    const body = res.body as Record<string, unknown> | undefined;
+    const detail =
+      body && Object.keys(body).length > 0
+        ? JSON.stringify(body)
+        : String(res.text ?? '').slice(0, 200) || '<empty body>';
+
+    // Content-Type earns its place here: this API's error handler ALWAYS emits
+    // a JSON payload, so an error response with no body did not come from the
+    // application at all — a distinction worth seeing at the moment of failure
+    // rather than deducing later.
+    const contentType = res.headers?.['content-type'] ?? '<none>';
+
+    error.message =
+      `${error.message}\n  ${this.method ?? '?'} ${this.url ?? '?'}` +
+      `\n  content-type: ${contentType}\n  body: ${detail}`;
+    return error;
+  };
+}
 
 const app = buildApp();
 

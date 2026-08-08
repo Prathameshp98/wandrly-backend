@@ -73,7 +73,21 @@ export async function truncateAll(): Promise<void> {
   );
 }
 
-/** Seed the FX rates the ledger needs for non-base-currency expenses. */
+/**
+ * Seed the FX rates the ledger needs for non-base-currency expenses.
+ *
+ * ⚠️ **`fx_rates` is the one piece of SHARED global state in the suite.** Every
+ * other table is isolated by unique data (see `resetDatabase` above), but these
+ * rows are seeded once for the whole run and never truncated, because rates are
+ * reference data rather than per-test fixtures.
+ *
+ * That makes them the one thing a test can break for every other file. A test
+ * that needs to *change* a rate — proving a frozen rate stays frozen, say —
+ * must use a currency pair no other test reads, never JPY→INR. Getting this
+ * wrong produces an order-dependent failure in a completely unrelated file,
+ * which is indistinguishable from the suite's existing flake and wastes the
+ * time of whoever chases it next.
+ */
 export async function seedFxRates(): Promise<void> {
   await db.execute(sql`
     INSERT INTO fx_rates (base_currency, quote_currency, rate, as_of) VALUES

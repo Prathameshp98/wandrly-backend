@@ -12,6 +12,25 @@ test today.
 
 ---
 
+## Progress
+
+| Phase | State | Tests | Bugs found |
+|---|---|---|---|
+| 0 — Suite health | ✅ | — | flake re-measured (~5%), diagnosis fixed |
+| 1 — Permission matrix | ✅ | +49 | **5** (2 cross-trip security holes) |
+| 2 — Money & ledger | ✅ | +18 | **4** (settle-up lost money) |
+| 3 — Canvas, variants, limits | ⏳ | | |
+| 4 — Collaboration & invites | ⏳ | | |
+| 5 — Sharing & privacy | ⏳ | | |
+| 6 — Media & third parties | ⏳ | | |
+| 7 — Cross-cutting | ⏳ | | |
+| 8 — The nine journeys | ⏳ | | |
+
+**409 → 476 tests. 9 real bugs found and fixed.** Two of them let a caller
+touch another trip's data; one silently lost money from the ledger.
+
+---
+
 ## What this plan is reacting to
 
 Measured on the current `main`, not assumed:
@@ -151,8 +170,46 @@ alternative — blocking all coverage work on a bug that survived 52 targeted
 reproduction attempts — trades certain progress for uncertain progress.
 
 **Standing instruction:** if any phase below sees an unexplained 404, capture
-the full assertion output before re-running. It now names which of the two
-candidates fired, and that single line likely closes this out.
+the full assertion output before re-running.
+
+#### Update after Phase 2 — the diagnostic paid off, and the diagnosis changed
+
+The flake was caught twice more with the patched assertion in place, and it is
+**not** what the record says it is:
+
+```
+FAIL test/api/canvas.test.ts > block sections > survives a fork with booking details intact
+  expected 201 "Created", got 404 "Not Found"
+  POST /v1/trips/019fe079-…/variants
+  body: <empty body>
+
+FAIL test/api/permissions.test.ts > marks a single notification read …
+  expected 201 "Created", got 404 "Not Found"
+  POST /v1/trips/019fe079-…/suggestions
+  body: <empty body>
+```
+
+**Both 404s have an empty body — and this API's error handler always emits a
+JSON payload** (`errorHandler.ts` ends in `res.status(...).json(payload)`, with
+no branch that sends an empty one). A missing row would produce
+`{"error":{"code":"NOT_FOUND",…}}`. An empty body means the response *did not
+come from the application*.
+
+That retires both of the candidates Phase 0 was left with — `loadTripAccess`
+returning null and `findBlockInTrip` returning null — because either would have
+produced a JSON payload. It also explains why the bug never reproduced under
+database-shaped pressure (pool contention, connection visibility, truncation):
+it was never a database bug. The next avenue is the HTTP layer between supertest
+and Express — a connection reused or torn down across the per-file app
+instances, of which there are now 21.
+
+The assertion patch now also reports `content-type`, so the next occurrence
+distinguishes "no body" from "a body that failed to parse" without a rerun.
+
+**Also fixed:** the patch was being applied once per test file. `isolate: true`
+gives each file a fresh module registry but `supertest` resolves to one cached
+instance, so each file wrapped the previous wrapper — a failure in the twelfth
+file printed its diagnostic twelve times. Guarded with a symbol.
 
 ---
 
@@ -301,6 +358,21 @@ found, all fixed.**
   recorded balances untouched.
 - Largest-remainder is stable across repeated identical splits.
 - A full-value refund returns every participant to their exact prior balance.
+
+**A flake I introduced, and caught with the Phase 0 diagnostic.** The first
+draft of the frozen-rate test moved `JPY→INR` to prove a recorded balance did
+not follow it — and never moved it back. `fx_rates` is seeded once for the whole
+run and never truncated, making it **the one piece of shared global state in the
+suite**; every other table isolates by unique data. So `ledger.test.ts` began
+failing intermittently, purely on file order, with `expected '696000' to be
+'580000'`.
+
+Worth stating plainly because it is the same shape as the flake Phase 0 could
+not pin down — and this one was diagnosed in a single run, because the patched
+assertion showed the *value* rather than just "one test failed". The test now
+mutates KWD→INR, which nothing else reads, and `support/db.ts` documents the
+constraint at the seeding function so the next person meets it before making the
+same mistake.
 
 **Found and recorded, not fixed — a documentation gap worth its own pass:**
 **21 of 99 operations declare their 2xx response body as an empty `{}` schema**,

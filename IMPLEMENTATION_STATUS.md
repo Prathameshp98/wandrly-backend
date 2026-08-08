@@ -386,10 +386,13 @@ Every module from here ships with API tests, because the harness exists.
   `findBlockInTrip` returning null ("Block not found") — which are unrelated
   bugs that the suite could not previously distinguish.
 
-  **`test/support/api.ts` now patches supertest's `_assertStatus`** to report
-  the method, URL, error code, message, and `requestId` on every status
-  mismatch, so the next occurrence identifies which. ~52 further runs under
-  deliberate CPU and disk contention did not reproduce it.
+  **`test/support/api.ts` patches supertest's `_assertStatus`** to report the
+  method, URL, content-type, error code, message, and `requestId` on every
+  status mismatch. That immediately changed the diagnosis: the flaky 404s come
+  back with an **empty body**, and this API's error handler always emits JSON —
+  so the response never came from the application. Both database-side candidates
+  are retired; the remaining avenue is the HTTP layer between supertest and the
+  21 per-file Express instances. See `E2E_TEST_PLAN.md` Phase 0.
 - Variant comparison (FR-VAR-05) is not implemented — forking works, but the
   side-by-side diff does not exist.
 - API tests cover the ledger only. Every module built from here adds its own.

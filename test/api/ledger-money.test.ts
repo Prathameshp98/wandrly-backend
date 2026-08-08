@@ -195,27 +195,39 @@ describe('currency exponents (FR-SPLIT-22)', () => {
     const ledger = await ledgerWith(2, { baseCurrency: 'INR' });
     const [arjun, priya] = ledger.participants;
 
+    // KWD is used by nothing else in the suite, deliberately.
+    //
+    // `fx_rates` is the one table seeded once for the whole run and never
+    // truncated between files, so it is shared global state — the single
+    // exception to the "isolate by unique data" rule in `support/db.ts`. An
+    // earlier draft of this test moved the JPY→INR rate and left it moved,
+    // which made `ledger.test.ts` fail intermittently depending on file order.
+    // Mutating a pair nobody else reads keeps the blast radius at zero.
     await authed(ledger.owner.token)
       .post(`/v1/trips/${ledger.tripId}/expenses`)
       .send({
-        description: 'Train pass',
-        amountMinor: '10000',
-        currency: 'JPY',
-        payments: [{ participantId: arjun, amountMinor: '10000' }],
+        description: 'Souq haul',
+        amountMinor: '1000',
+        currency: 'KWD',
+        payments: [{ participantId: arjun, amountMinor: '1000' }],
         split: { method: 'EQUAL', participantIds: [arjun, priya] },
       })
       .expect(201);
 
     const before = await expectBalanced(ledger);
+    expect(netOf(before, priya)).not.toBe(0n);
 
-    // The yen moves 20%. Balances recorded yesterday must not move with it.
+    // The dinar moves 20%. Balances recorded yesterday must not move with it.
     await db.execute(sql`
-      UPDATE fx_rates SET rate = 0.69600000
-       WHERE base_currency = 'JPY' AND quote_currency = 'INR'
+      UPDATE fx_rates SET rate = 325.20000000
+       WHERE base_currency = 'KWD' AND quote_currency = 'INR'
     `);
 
     const after = await expectBalanced(ledger);
-    expect(netOf(after, priya)).toBe(netOf(before, priya));
+    expect(
+      netOf(after, priya),
+      'a rate change restated a balance that was already recorded',
+    ).toBe(netOf(before, priya));
   });
 });
 
