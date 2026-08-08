@@ -20,8 +20,36 @@ export const MapSection = z.object({
   placeId: z.string().max(200).optional(),
 });
 
+/**
+ * A link the user pasted, rendered as an `<a href>` on the PUBLIC page.
+ *
+ * `.url()` alone is not enough: it defers to `new URL()`, which considers
+ * `javascript:alert(1)`, `data:text/html,…` and `vbscript:` perfectly
+ * well-formed. Escaping does not help — those payloads contain no markup — so a
+ * Contributor could store one and it would ship to every unauthenticated
+ * visitor of the share link as a clickable script.
+ *
+ * FR-SEC-05 imagines the SERVER fetching this metadata and sandboxing the
+ * fetch. No such fetch exists; every field here is client-supplied, which
+ * removes the SSRF surface and makes the scheme check the whole defence.
+ */
+const HttpUrl = z
+  .string()
+  .url()
+  .max(2000)
+  .refine(
+    (value) => {
+      try {
+        return ['http:', 'https:'].includes(new URL(value).protocol);
+      } catch {
+        return false;
+      }
+    },
+    { message: 'Only http and https links are allowed' },
+  );
+
 export const LinkSection = z.object({
-  url: z.string().url().max(2000),
+  url: HttpUrl,
   host: z.string().max(200),
   title: z.string().max(300),
   desc: z.string().max(1000).default(''),

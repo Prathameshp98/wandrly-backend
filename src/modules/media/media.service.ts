@@ -37,6 +37,16 @@ export interface UploadResult {
   height: number | null;
   byteSize: number;
   tone: string;
+  altText: string | null;
+  /**
+   * FR-MEDIA-03 is a licence obligation, so these are part of EVERY
+   * representation — explicitly null for a device upload rather than omitted.
+   * "Field missing" and "no credit required" must not look alike to a client
+   * deciding whether it has to render a photographer's name.
+   */
+  provider: string | null;
+  attribution: string | null;
+  attributionUrl: string | null;
 }
 
 export class MediaService {
@@ -98,6 +108,14 @@ export class MediaService {
       height: info.height,
       byteSize: sanitised.byteLength,
       tone: placeholderTone(sanitised),
+      altText: options.altText ?? null,
+      // FR-MEDIA-03 is a licence obligation, so attribution is part of EVERY
+      // representation — explicitly null for a device upload rather than
+      // omitted. A client cannot render a credit it cannot see the absence of,
+      // and "field missing" and "no credit required" must not look alike.
+      provider: null,
+      attribution: null,
+      attributionUrl: null,
     };
   }
 

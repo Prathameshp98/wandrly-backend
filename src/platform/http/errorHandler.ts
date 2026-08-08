@@ -72,6 +72,28 @@ function normalise(error: unknown): AppError {
     }
   }
 
+  // body-parser rejects a malformed or oversized body before any route sees
+  // it, and neither error had a mapping — so broken JSON and an over-limit
+  // upload both surfaced as 500s. Both are the client's doing, and a 500 tells
+  // the caller to retry something that will never work.
+  if (typeof error === 'object' && error !== null && 'type' in error) {
+    const { type } = error as { type?: string };
+
+    if (type === 'entity.too.large') {
+      return new (class extends AppError {
+        readonly code = 'LIMIT_EXCEEDED' as const;
+        readonly status = 413;
+      })('That file is larger than the upload limit.');
+    }
+
+    if (type === 'entity.parse.failed' || type === 'encoding.unsupported') {
+      return new (class extends AppError {
+        readonly code = 'VALIDATION_FAILED' as const;
+        readonly status = 400;
+      })('The request body could not be parsed as JSON.');
+    }
+  }
+
   return new InternalError();
 }
 

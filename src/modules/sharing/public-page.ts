@@ -38,17 +38,56 @@ export interface PageOptions {
   readonly comments?: { id: string; blockId: string | null; body: string; authorName: string }[];
 }
 
+/**
+ * A href safe to emit, or nothing at all.
+ *
+ * The contract now rejects non-http(s) URLs, but rows written before that fix
+ * are still in the database, and this page ships to unauthenticated visitors.
+ * Escaping cannot help here — `javascript:alert(1)` contains no markup — so the
+ * scheme has to be checked at the point of rendering too.
+ */
+function safeHref(url: string): string | null {
+  try {
+    return ['http:', 'https:'].includes(new URL(url).protocol) ? url : null;
+  } catch {
+    return null;
+  }
+}
+
 export function renderPublicPage(options: PageOptions): string {
   const { view, ownerName, canonicalUrl } = options;
   const description = `${view.destination} · ${view.dateRangeLabel} · ${view.days.length} days planned on Wandrly`;
 
   const commentsByBlock = new Map<string, typeof options.comments>();
+  /**
+   * Comments left on the trip rather than on a block.
+   *
+   * `blockId` is nullish in the contract and the API happily accepts a
+   * trip-level guest comment, so dropping them here meant a visitor got a 201
+   * and then watched their comment never appear — the worst of both answers.
+   */
+  const tripComments: NonNullable<typeof options.comments> = [];
+
   for (const comment of options.comments ?? []) {
-    if (!comment.blockId) continue;
+    if (!comment.blockId) {
+      tripComments.push(comment);
+      continue;
+    }
     const list = commentsByBlock.get(comment.blockId) ?? [];
     list.push(comment);
     commentsByBlock.set(comment.blockId, list);
   }
+
+  const tripCommentsHtml = tripComments.length
+    ? `<section class="day">
+         <h2 class="d-title">Notes from visitors</h2>
+         ${tripComments
+           .map(
+             (c) => `<div class="cmt"><b>${esc(c.authorName)}</b> ${esc(c.body)}</div>`,
+           )
+           .join('')}
+       </section>`
+    : '';
 
   return `<!doctype html>
 <html lang="en">
@@ -147,11 +186,16 @@ ${view.days
           ${block.meta ? `<div class="b-meta">${esc(block.meta)}</div>` : ''}
           ${block.notes ? `<div class="b-meta">${esc(block.notes)}</div>` : ''}
           ${block.map ? `<div class="b-meta">◉ ${esc(block.map.name)}</div>` : ''}
-          ${
-            block.link
-              ? `<div class="b-meta"><a href="${esc(block.link.url)}" rel="nofollow noopener" target="_blank">${esc(block.link.title || block.link.host)} ↗</a></div>`
-              : ''
-          }
+          ${(() => {
+            if (!block.link) return '';
+            const label = esc(block.link.title || block.link.host);
+            const href = safeHref(block.link.url);
+            // A link with an unusable scheme degrades to plain text rather than
+            // disappearing: the visitor still sees what was there.
+            return href
+              ? `<div class="b-meta"><a href="${esc(href)}" rel="nofollow noopener" target="_blank">${label} ↗</a></div>`
+              : `<div class="b-meta">${label}</div>`;
+          })()}
           ${block.photoCount > 0 ? `<div class="b-meta">▣ ${block.photoCount} photo${block.photoCount === 1 ? '' : 's'}</div>` : ''}
           ${block.isConfirmed ? '<div class="booked">✓ Booked</div>' : ''}
           ${blockComments
@@ -165,6 +209,8 @@ ${view.days
   </section>`,
   )
   .join('')}
+
+  ${tripCommentsHtml}
 
   <div class="cta">
     <strong>Planning a trip of your own?</strong>
