@@ -19,14 +19,14 @@ test today.
 | 0 — Suite health | ✅ | +3 | **2** — the flake, root-caused and fixed |
 | 1 — Permission matrix | ✅ | +49 | **5** (2 cross-trip security holes) |
 | 2 — Money & ledger | ✅ | +18 | **4** (settle-up lost money) |
-| 3 — Canvas, variants, limits | ⏳ | | |
+| 3 — Canvas, variants, limits | ✅ | +14 | **2** + 1 vacuous test replaced |
 | 4 — Collaboration & invites | ⏳ | | |
 | 5 — Sharing & privacy | ⏳ | | |
 | 6 — Media & third parties | ⏳ | | |
 | 7 — Cross-cutting | ⏳ | | |
 | 8 — The nine journeys | ⏳ | | |
 
-**409 → 479 tests. 11 real bugs found and fixed.** Two let a caller touch
+**409 → 465 tests. 13 real bugs found and fixed.** Two let a caller touch
 another trip's data, one silently lost money from the ledger, one broke the
 idempotency guarantee — and the long-standing suite flake is root-caused and
 gone (20/20 clean, from 3-in-15 immediately before).
@@ -78,7 +78,7 @@ call, not the test plan's** — the plan's job is to stop them being invisible.
 | Requirement | State | Phase |
 |---|---|---|
 | `FR-SPLIT-41` — edit an expense | `updateFields`/`replaceSplit` exist; no `PATCH /expenses/:id` route. The audit-on-edit requirement is unreachable. | 2 |
-| `FR-SEC-03` — max 20 photos per block | `limits.photosPerBlock` is defined in `env.ts` and read by nothing. The ceiling does not exist. | 3 |
+| ~~`FR-SEC-03` — max 20 photos per block~~ | **Corrected in Phase 3.** The ceiling *did* exist — as a hardcoded `.max(20)` in the Zod schema, which is why `limits.photosPerBlock` appeared unused. Now wired to the config, as PRD D-10 requires. | 3 ✅ |
 | `FR-VAR-05` — compare variants | No route. Forking works; the diff that makes it useful does not. | 3 |
 | `FR-SHARE-06` — public suggestions | Toggle stored and returned; no public route consumes it. | 5 |
 | `FR-COLLAB-06/07` — realtime co-editing | The WebSocket server attaches in `server.ts`, outside `buildApp()`, so supertest cannot reach it. Zero coverage. | 7 |
@@ -528,7 +528,55 @@ disproven or fixed.
 
 ---
 
-### Phase 3 — Canvas, variants, days, blocks, limits
+### Phase 3 — Canvas, variants, days, blocks, limits ✅
+
+**14 tests added** (`canvas-limits.test.ts`), one deleted. Suite: 452 → 465.
+
+**A test that proved nothing.** `canvas.test.ts` had:
+
+```ts
+it('enforces the per-day block ceiling', async () => {
+  // …
+  expect(body.days[0].blocks.length).toBeLessThan(200);
+});
+```
+
+It asserted that a day holding **one** block held fewer than 200 — which passes
+just as happily if no ceiling exists at all. Replaced with one that fills a day
+to `limits.blocksPerDay` and requires the next insert to be refused.
+
+**A correction to my own Phase 0 note.** I recorded `FR-SEC-03`'s photo cap as
+"the ceiling does not exist" because `limits.photosPerBlock` was read nowhere.
+It *was* enforced — by a hardcoded `.max(20)` in the contract. So the ceiling
+worked and the env var was decorative: changing `LIMIT_PHOTOS_PER_BLOCK` moved
+nothing, contradicting PRD D-10's "limits are configuration, not constants".
+The schema now reads the config, so the OpenAPI spec also reports the deployed
+number rather than a literal.
+
+**A concurrency defect, pinned rather than hidden.** Filling days in parallel
+collided on `days_variant_number_uq`: the service derives the next day number
+from a `max()` and inserts, so two writers pick the same number and the loser
+gets an opaque `DOMAIN_RULE_VIOLATION`.
+
+The invariant that matters holds — numbering stays contiguous and no day is lost,
+because the database constraint catches it. But with real-time co-editing
+(FR-COLLAB-06) two people pressing "Add a day" together is ordinary use, and one
+of them gets an error naming a database constraint. There is now a test that
+pins the current behaviour and says so, rather than a ceiling test that quietly
+serialised its writes to avoid the subject.
+
+**Also newly covered:** fork isolation in the *second* direction (editing the
+original leaves the fork alone — a shared row fails exactly one of the two
+directions, and only one was tested); forking a fork; block restore returning to
+its original position rather than the end of the day; deleting the only day;
+reorders naming a day twice or a day from another variant; moving a block
+between variants of the same trip; every block type accepted and an unknown one
+refused; and readiness as an exact percentage (33% for 1 of 3 bookable, with a
+NOTE not diluting the denominator) plus 100% for a COMPLETED trip.
+
+---
+
+### Phase 3 — original scope
 
 **Variants**
 - Fork isolation both directions: edit the fork, original untouched; edit the

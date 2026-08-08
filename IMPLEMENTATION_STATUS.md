@@ -3,7 +3,7 @@
 Honest accounting of what is built, what is not, and the order to continue in.
 Tracks the phases in `TECHNICAL_DESIGN.md` §17.
 
-**Verified working:** 479 tests (199 unit + 280 API) · `tsc --noEmit` and ESLint
+**Verified working:** 465 tests (199 unit + 266 API) · `tsc --noEmit` and ESLint
 clean · 25 tables migrated · invariant triggers reject bad data · auth guards
 return 401/403/404 correctly · all 99 operations documented in `openapi.json`,
 enforced by a test · **a full user journey — folder → trip → participant →
@@ -277,6 +277,22 @@ The driver interface supports either shape if volume ever changes that.
 sizes (so FR-NFR-PERF-08 is unmet), no real blurhash (an average tone stands in),
 and EXIF stripping covers JPEG only. All three are fixed by adding `sharp`, at
 the cost of a much larger container — worth doing on a paid instance.
+
+### Canvas ceilings & config drift ✅
+`FR-SEC-03`'s photo cap was a hardcoded `.max(20)` in the contract, so
+`LIMIT_PHOTOS_PER_BLOCK` was decorative — changing it moved nothing, against
+PRD D-10's "limits are configuration, not constants". Now read from config, so
+the OpenAPI spec reports the deployed number too.
+
+`canvas.test.ts`'s block-ceiling test asserted that a day holding one block held
+fewer than 200 — it would have passed with no ceiling at all. Replaced with one
+that fills the day to the limit and requires the next insert to be refused.
+
+**Known, pinned by a test:** two concurrent "Add a day" requests collide on
+`days_variant_number_uq`, because the next day number comes from a `max()` and
+both writers pick the same one. Numbering stays contiguous and no day is lost —
+the constraint catches it — but the loser sees an opaque
+`DOMAIN_RULE_VIOLATION`, and with real-time co-editing that is ordinary use.
 
 ### Route contract & permission matrix ✅
 `test/api/route-contract.test.ts` walks the live router stack and fails any

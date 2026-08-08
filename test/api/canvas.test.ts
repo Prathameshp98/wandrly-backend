@@ -353,13 +353,10 @@ describe('blocks', () => {
       .expect(409);
   });
 
-  it('enforces the per-day block ceiling', async () => {
-    // Exercised via config rather than 200 requests: the limit is read from env.
-    const { owner, trip, canvas } = await scaffold();
-    void canvas;
-    const { body } = await authed(owner.token).get(`/v1/trips/${trip.id}/canvas`);
-    expect(body.days[0].blocks.length).toBeLessThan(200);
-  });
+  // The per-day block ceiling is asserted for real in `canvas-limits.test.ts`,
+  // by filling a day to the limit and requiring the next insert to be refused.
+  // What stood here asserted that a day holding one block held fewer than 200 —
+  // which passes just as happily when no ceiling exists at all.
 
   it('refuses to move a block into another trip', async () => {
     const a = await scaffold();

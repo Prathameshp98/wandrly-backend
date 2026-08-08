@@ -5,6 +5,8 @@
 
 import { z } from 'zod';
 
+import { limits } from '../platform/config/env';
+
 import { BlockType, IsoDate, IsoDateTime, MoneyString, TripStatus, Uuid } from './common';
 
 // ── Block sections (FR-SEC-01…09) ───────────────────────────────────
@@ -45,7 +47,10 @@ export const CostSection = z.object({
 export const BlockSections = z
   .object({
     notes: NotesSection.optional(),
-    photos: z.array(Uuid).max(20).optional(),
+    // FR-SEC-03's cap, read from config rather than written as a literal:
+    // PRD D-10 makes every such ceiling configuration, and a hardcoded 20 left
+    // LIMIT_PHOTOS_PER_BLOCK decorative — changing it moved nothing.
+    photos: z.array(Uuid).max(limits.photosPerBlock).optional(),
     map: MapSection.optional(),
     link: LinkSection.optional(),
     booking: BookingSection.optional(),
