@@ -61,8 +61,12 @@ Swagger UI.
 `Idempotency-Key` header on mutating routes. Keys are claimed atomically via
 `ON CONFLICT DO NOTHING`, so exactly one concurrent request wins; retries replay
 the stored response with `Idempotent-Replay: true`. Same key + different body →
-409. Keys are scoped per user and purged after 24h. Applied to trip creation and
-duplication; wire it onto expense/settlement creation next.
+409. Keys are scoped per user and purged after 24h.
+
+Applied at six sites: trip creation and duplication (`trips.routes.ts:85,172`),
+expense and settlement creation (`ledger.routes.ts:117,190`), variant creation
+(`canvas.routes.ts:63`), and invites (`collab.routes.ts:113`). **Only the trip
+routes have tests** — see `E2E_TEST_PLAN.md` Phase 7.
 
 ### Phase C — Trips & folders ✅
 Trip CRUD, per-user pinning and ordering (`trip_user_state`, never a column on
@@ -325,17 +329,30 @@ Every module from here ships with API tests, because the harness exists.
 - **Public suggestions (FR-SHARE-06) are not implemented.** The `allowSuggestions`
   toggle is stored and returned but no public route consumes it. Member
   suggestions work.
-- **Known test flake, ~8% of full-suite runs.** Always the same shape: a row
-  created moments earlier returns 404, in a different test each time. Never
-  reproduces on a single file — only with several. Ruled out so far, with
-  evidence: worker parallelism (files proven sequential by probe), pool size
-  (unchanged at 20), per-test truncation (removed entirely), leaked pools
-  (`isolate: true` + per-file close), non-atomic factories (now transactional),
-  and untracked background writes (now drained). Each fix reduced the rate —
-  from ~30% to ~8% — but none eliminated it. **Do not add modules on top of a
-  flaky suite; finish this first.** Next avenues: a per-file database rather
-  than a shared one, and logging the actual SQL visibility at the moment of
-  failure.
+- **Known test flake, ~5% of full-suite runs** (re-measured: 3 failures in 69
+  runs). Always the same shape: a row created moments earlier returns 404, in a
+  different test each time. Never reproduces on a single file — only with
+  several. Ruled out so far, with evidence: worker parallelism (files proven
+  sequential by probe), pool size (unchanged at 20), per-test truncation
+  (removed entirely), leaked pools (`isolate: true` + per-file close),
+  non-atomic factories (now transactional), untracked background writes (now
+  drained), and — added in the E2E test-plan pass — **job workers** (`startJobs`
+  returns early under `isTest`), **idempotency background writes** (unreachable
+  without an `Idempotency-Key` header), **fake-timer bleed across files** (no
+  test installs them), and **responding before commit** (no route responds
+  inside `withTransaction`).
+
+  One occurrence is captured in full in `E2E_TEST_PLAN.md` Phase 0:
+  `canvas.test.ts > blocks > soft-deletes and restores`, where `DELETE`
+  404s on a block whose creation asserted 201 moments earlier. It narrows to two
+  candidates — `loadTripAccess` returning null ("Trip not found") or
+  `findBlockInTrip` returning null ("Block not found") — which are unrelated
+  bugs that the suite could not previously distinguish.
+
+  **`test/support/api.ts` now patches supertest's `_assertStatus`** to report
+  the method, URL, error code, message, and `requestId` on every status
+  mismatch, so the next occurrence identifies which. ~52 further runs under
+  deliberate CPU and disk contention did not reproduce it.
 - Variant comparison (FR-VAR-05) is not implemented — forking works, but the
   side-by-side diff does not exist.
 - API tests cover the ledger only. Every module built from here adds its own.
