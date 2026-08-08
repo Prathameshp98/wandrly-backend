@@ -3,7 +3,7 @@
 Honest accounting of what is built, what is not, and the order to continue in.
 Tracks the phases in `TECHNICAL_DESIGN.md` §17.
 
-**Verified working:** 465 tests (199 unit + 266 API) · `tsc --noEmit` and ESLint
+**Verified working:** 535 tests (199 unit + 336 API) · `tsc --noEmit` and ESLint
 clean · 25 tables migrated · invariant triggers reject bad data · auth guards
 return 401/403/404 correctly · all 99 operations documented in `openapi.json`,
 enforced by a test · **a full user journey — folder → trip → participant →
@@ -278,6 +278,87 @@ sizes (so FR-NFR-PERF-08 is unmet), no real blurhash (an average tone stands in)
 and EXIF stripping covers JPEG only. All three are fixed by adding `sharp`, at
 the cost of a much larger container — worth doing on a paid instance.
 
+### End-to-end journeys ✅
+All nine PRD §15.2 critical flows run as single tests built through the API,
+crossing the module seams that every other test avoids. No new bugs — eight
+passed first time, the ninth on a wrong query parameter in my own test. Given
+that seven earlier phases had fixed 23 bugs, several of them exactly at these
+seams, the journeys passing first time is evidence those fixes were right.
+
+### Cross-cutting concerns ✅
+**Malformed JSON was a 500.** `express.json()` rejects a broken body with
+`entity.parse.failed`, which had no mapping. Same class as the oversized-upload
+500: body-parser errors bypass every route, so nothing in the module layer could
+have caught them. Both now handled in one place — 400 and 413 respectively.
+
+`/internal/cron` had **zero tests** and now has eight, covering secret handling
+by both header and bearer, all three job groups, `inline` reconciliation, and
+the 20/minute rate limit. Idempotency is now tested on all six routes that
+declare it, not one. Optimistic locking covers days as well as trips, blocks and
+notes. Six concurrent expense creations keep `SUM(net) = 0`.
+
+**Two findings that were good news:** the deferred constraint trigger makes a
+corrupt ledger unreachable — an attempt to knock one out of balance is rejected
+outright, so reconciliation is defence-in-depth rather than the only guard. And
+a bodyless cron POST is refused rather than defaulting; `.github/workflows/
+cron.yml` does send `-d '{"group":"…"}'`, so the deployed caller is correct.
+
+### Media & link boundaries ✅
+**Stored XSS on the public page, found and fixed.** `LinkSection.url` used
+`z.string().url()`, which defers to `new URL()` and accepts `javascript:`,
+`data:` and `vbscript:`. The public page renders `<a href="${esc(url)}">` and
+escaping does nothing to a scheme, so any Contributor could store one and it
+would ship as a clickable script to every unauthenticated visitor of the share
+link. Fixed at the contract *and* at the renderer — the contract protects new
+rows, but anything already stored still ships to strangers.
+
+Two more: an upload over `LIMIT_UPLOAD_BYTES` surfaced body-parser's
+`entity.too.large` as a **500** instead of a 413; and a device upload omitted
+`attribution`/`attributionUrl`/`provider` entirely, so a client could not tell
+"no credit required" from "field missing" — they are now always present and
+explicitly null, since FR-MEDIA-03 is a licence obligation.
+
+**`FR-SEC-05` does not exist as specified.** There is no server-side OpenGraph
+fetch; the client supplies `url`, `host`, `title` and `desc`. Better for SSRF
+(no surface), worse for trust (all four are attacker-controlled).
+
+### Public surface & privacy ✅
+`FR-SPLIT-40` and `FR-SEC-09` verified by planting four recognisable secrets — a
+booking confirmation, a seat number, a stored UPI id, an expense description —
+and searching every public representation for all four. Nothing leaks, with all
+toggles on and when the link targets a non-main variant.
+
+**Three bugs found and fixed:**
+1. **A guest token outlived its link.** `deleteGuestComment` checked only that
+   the slug existed, not `isEnabled`/`expiresAt`, so posting a guest comment
+   404'd after sharing was turned off while deleting one still returned 204.
+2. **`/p/:slug/data` answered 403 where `/p/:slug` answered 401** for the same
+   password challenge — "never" instead of "supply the password".
+3. **Trip-level guest comments were accepted then never rendered.** The template
+   grouped by `blockId` and dropped comments without one, though the contract
+   allows them. Visitors got a 201 and saw nothing.
+
+**Recorded, not changed:** the share password travels as `?password=…`, so it
+lands in browser history, access logs, and any `Referer` sent to the
+third-party links the page renders. Fixing it changes the public URL contract.
+
+### Invite security ✅
+`claimsParticipantId` decides whose ledger history an accepter inherits. It
+arrived from the client and was stored unchecked, which allowed two attacks:
+naming a participant from **another trip** (reassigning a stranger's ledger
+identity on a trip the sender cannot see), and naming a participant who
+**already has an account** (transferring an existing member's balances to
+whoever redeemed the link). Both returned 201. Now guarded at send time *and*
+again inside the accept transaction, since the placeholder can be claimed in
+between and redemption is when the money moves.
+
+The member ceiling was also advisory: it counted only accepted members, so
+inviting past it and letting everyone accept worked. Pending invites now count,
+and the hard check runs at accept time.
+
+Transferring ownership to yourself returned 204 — a no-op that still wrote an
+activity event claiming a handover. Now refused.
+
 ### Canvas ceilings & config drift ✅
 `FR-SEC-03`'s photo cap was a hardcoded `.max(20)` in the contract, so
 `LIMIT_PHOTOS_PER_BLOCK` was decorative — changing it moved nothing, against
@@ -288,11 +369,13 @@ the OpenAPI spec reports the deployed number too.
 fewer than 200 — it would have passed with no ceiling at all. Replaced with one
 that fills the day to the limit and requires the next insert to be refused.
 
-**Known, pinned by a test:** two concurrent "Add a day" requests collide on
-`days_variant_number_uq`, because the next day number comes from a `max()` and
-both writers pick the same one. Numbering stays contiguous and no day is lost —
-the constraint catches it — but the loser sees an opaque
-`DOMAIN_RULE_VIOLATION`, and with real-time co-editing that is ordinary use.
+**Fixed:** two concurrent "Add a day" requests collided on
+`days_variant_number_uq`, because day numbers come from `count + 1` read inside
+the transaction and both writers picked the same one. Nothing was corrupted —
+the constraint caught it — but the loser saw an opaque `DOMAIN_RULE_VIOLATION`,
+and with real-time co-editing that is ordinary use. A `FOR UPDATE` row lock on
+the variant now serialises numbering per variant, applied to append, duplicate,
+and the renumber after a delete.
 
 ### Route contract & permission matrix ✅
 `test/api/route-contract.test.ts` walks the live router stack and fails any

@@ -19,14 +19,14 @@ test today.
 | 0 — Suite health | ✅ | +3 | **2** — the flake, root-caused and fixed |
 | 1 — Permission matrix | ✅ | +49 | **5** (2 cross-trip security holes) |
 | 2 — Money & ledger | ✅ | +18 | **4** (settle-up lost money) |
-| 3 — Canvas, variants, limits | ✅ | +14 | **2** + 1 vacuous test replaced |
-| 4 — Collaboration & invites | ⏳ | | |
-| 5 — Sharing & privacy | ⏳ | | |
-| 6 — Media & third parties | ⏳ | | |
-| 7 — Cross-cutting | ⏳ | | |
-| 8 — The nine journeys | ⏳ | | |
+| 3 — Canvas, variants, limits | ✅ | +14 | **3** + 1 vacuous test replaced |
+| 4 — Collaboration & invites | ✅ | +9 | **3** (2 let you steal a ledger identity) |
+| 5 — Sharing & privacy | ✅ | +15 | **3** |
+| 6 — Media & third parties | ✅ | +16 | **3** (incl. stored XSS on the public page) |
+| 7 — Cross-cutting | ✅ | +21 | **1** + 2 findings that were good news |
+| 8 — The nine journeys | ✅ | +9 | **0** — every seam held |
 
-**409 → 465 tests. 13 real bugs found and fixed.** Two let a caller touch
+**409 → 535 tests. 23 real bugs found, all 23 fixed and covered by tests. All eight phases complete.** Two let a caller touch
 another trip's data, one silently lost money from the ledger, one broke the
 idempotency guarantee — and the long-standing suite flake is root-caused and
 gone (20/20 clean, from 3-in-15 immediately before).
@@ -82,6 +82,7 @@ call, not the test plan's** — the plan's job is to stop them being invisible.
 | `FR-VAR-05` — compare variants | No route. Forking works; the diff that makes it useful does not. | 3 |
 | `FR-SHARE-06` — public suggestions | Toggle stored and returned; no public route consumes it. | 5 |
 | `FR-COLLAB-06/07` — realtime co-editing | The WebSocket server attaches in `server.ts`, outside `buildApp()`, so supertest cannot reach it. Zero coverage. | 7 |
+| `FR-SEC-05` — server-fetched link previews | **No such fetch exists.** `LinkSection` takes `url`, `host`, `title` and `desc` straight from the client, so there is no SSRF surface to sandbox — but every field is attacker-controlled input the public page renders. Phase 6 hardened the one that mattered. | 6 |
 | `FR-SPLIT-47` — ledger at 500 expenses × 20 participants | No load assertion anywhere. | 2 |
 
 ---
@@ -553,17 +554,20 @@ nothing, contradicting PRD D-10's "limits are configuration, not constants".
 The schema now reads the config, so the OpenAPI spec also reports the deployed
 number rather than a literal.
 
-**A concurrency defect, pinned rather than hidden.** Filling days in parallel
-collided on `days_variant_number_uq`: the service derives the next day number
-from a `max()` and inserts, so two writers pick the same number and the loser
-gets an opaque `DOMAIN_RULE_VIOLATION`.
+**A concurrency defect — found, then fixed.** Filling days in parallel
+collided on `days_variant_number_uq`: day numbers come from `count + 1` read
+inside the transaction, so under READ COMMITTED two writers both read N and both
+insert N+1. Nothing was ever corrupted — the constraint caught it — but the
+loser got an opaque `DOMAIN_RULE_VIOLATION` naming a database index, and with
+real-time co-editing (FR-COLLAB-06) two people pressing "Add a day" together is
+ordinary use.
 
-The invariant that matters holds — numbering stays contiguous and no day is lost,
-because the database constraint catches it. But with real-time co-editing
-(FR-COLLAB-06) two people pressing "Add a day" together is ordinary use, and one
-of them gets an error naming a database constraint. There is now a test that
-pins the current behaviour and says so, rather than a ceiling test that quietly
-serialised its writes to avoid the subject.
+Initially recorded as known-and-pinned. Now fixed: a `SELECT … FOR UPDATE` row
+lock on the variant serialises numbering for that variant only, so parallel
+plans and other trips are unaffected and no retry loop is needed. Applied to
+every path that assigns day numbers — append, duplicate, and the renumber after
+a delete. Four concurrent appends now all return 201, and the ceiling test fills
+in parallel batches again rather than one at a time.
 
 **Also newly covered:** fork isolation in the *second* direction (editing the
 original leaves the fork alone — a shared row fails exactly one of the two
@@ -627,7 +631,58 @@ unenforced.
 
 ---
 
-### Phase 4 — Collaboration and invite security
+### Phase 4 — Collaboration and invite security ✅
+
+**9 tests added** (`invites-security.test.ts`). Suite: 465 → 474. **Three real
+bugs, two of them serious.**
+
+`claimsParticipantId` is the field that decides **whose ledger history the
+accepter inherits**. It arrives from the client and was stored verbatim — never
+checked against the trip, never checked to be an unclaimed placeholder. That was
+two attacks at once:
+
+1. **Cross-trip identity theft.** An Editor of trip A could send an invite
+   naming a participant id from trip B. On accept, that row's `userId` was
+   overwritten — handing the accepter someone else's ledger identity, balances
+   and all, on a trip the sender cannot even see. `POST /invites` returned 201.
+
+2. **Same-trip identity theft.** The id could name a participant who already
+   has an account. Accepting overwrote their `userId`, `claimedAt` and
+   `displayName`, transferring an existing member's entire financial history to
+   whoever redeemed the link. Also 201.
+
+Both now go through one guard, applied **twice**: when the invite is written,
+and again inside the accept transaction — because the placeholder can be claimed
+by someone else in between, and redemption is the moment the money actually
+moves. "Not on this trip" answers 404 rather than 422, so an invite cannot be
+used to probe for participant ids on trips the sender has no access to.
+
+3. **The member ceiling was advisory.** `sendInvites` compared
+   `members + emails` against `LIMIT_MEMBERS_PER_TRIP` while counting only
+   *accepted* members, so nothing stopped 49 invites, then 49 more, then
+   everyone accepting. Pending invites now count at send time, and the
+   authoritative check moved to accept time — the only point at which the
+   membership count is final.
+
+Also fixed: transferring ownership **to yourself** returned 204. The
+clear-then-set leaves the invariant intact, so it is a no-op — but it wrote an
+activity event claiming a handover that never happened. Now refused, matching
+the existing refusal to change your own role.
+
+**Two stated security properties had no test and now do:** that a database read
+never yields a usable join link (the stored value is a 64-hex digest and never
+appears in any response), and that every well-formed unknown token is answered
+identically, so a caller cannot probe which invites exist.
+
+**One of my assertions was too strict.** I first required malformed tokens to be
+indistinguishable from unknown ones. They are not — a malformed token is refused
+by the schema (400) and an unknown one by the lookup (404). That leaks nothing:
+it says "that is not a token shape", not "no such token". The test now compares
+only well-formed guesses, which is the property that actually matters.
+
+---
+
+### Phase 4 — original scope
 
 The invite path is the only route in the system that runs outside
 `withTripAccess`, which makes it the highest-value adversarial target.
@@ -656,7 +711,67 @@ The invite path is the only route in the system that runs outside
 
 ---
 
-### Phase 5 — Sharing, the public surface, and privacy
+### Phase 5 — Sharing, the public surface, and privacy ✅
+
+**15 tests added** (`public-privacy.test.ts`). Suite: 474 → 489. **Three real
+bugs.**
+
+The privacy core held up. A fixture plants four recognisable secrets — a booking
+confirmation, a seat number, a stored UPI id, and an expense description — and
+every public representation is searched for all four. Nothing leaked, with every
+toggle on, and also when the link points at a non-main variant. The JSON is
+additionally checked to carry no `booking`, `cost`, `sections`, `expenses` or
+`balances` key at all, so a future template cannot render what it never
+received. `FR-SPLIT-40` and `FR-SEC-09` hold.
+
+What did not hold:
+
+1. **A guest token outlived the link that issued it.** `deleteGuestComment`
+   looked the share link up by slug and checked only that it existed — never
+   `isEnabled`, never `expiresAt`. So after an owner switched sharing off,
+   *posting* a guest comment correctly 404'd while *deleting* one still returned
+   204. A guest token is a capability scoped to one link; revoking the link has
+   to revoke the token with it.
+
+2. **The public JSON and the public HTML disagreed about a password.** The HTML
+   route catches `ForbiddenError` and answers 401 with the password form. Its
+   JSON twin let the error fall through to the handler, which maps it to **403**
+   — telling a client "never" where the truth is "supply the password". Same
+   condition, same link, two different meanings. The JSON route now answers 401
+   with a `PASSWORD_REQUIRED` code.
+
+3. **Trip-level guest comments were accepted and then never shown.**
+   `renderPublicPage` groups comments by `blockId` and dropped any without one
+   (`if (!comment.blockId) continue`). But `blockId` is nullish in the contract
+   and the API happily accepts a trip-level comment — so a visitor got a 201 and
+   then watched their comment never appear, which is worse than either accepting
+   or refusing it cleanly. They now render in a "Notes from visitors" section.
+
+**Also verified rather than assumed:** disabling a link takes effect
+immediately and re-enabling restores it; revoking and re-sharing mints a
+*different* slug rather than reusing the old one; an expired link is
+byte-for-byte identical to an invented slug, so it cannot confirm a trip exists;
+the password is never echoed into the page it protects (it travels as a query
+parameter, so it is already in the viewer's history — rendering it would put it
+in every screenshot too); markup in a trip title is escaped while a 4-byte emoji
+and RTL text survive intact; exports name their variant (`FR-EXP-07`), default
+booking details off, produce CRLF-terminated `VCALENDAR` with balanced
+`VEVENT`s, and quote a comma inside a CSV description rather than splitting the
+row.
+
+**Worth a decision, not a bug:** the share password travels as `?password=…`.
+That puts it in browser history, server access logs, and any `Referer` sent to
+the third-party links the page renders. A POST-and-cookie exchange would avoid
+all three. Recorded rather than changed, since it alters the public URL contract.
+
+**One of my assertions was wrong.** I first required the escaped guest comment
+to be *absent* from the page. It should be present and escaped — dropping it
+silently is the bug I had just fixed elsewhere. Corrected to assert
+`&lt;img src=x` appears.
+
+---
+
+### Phase 5 — original scope
 
 Privacy assertions here search the **raw payload** for the secret, rather than
 checking the response shape. A shape assertion passes when a future template
@@ -685,7 +800,58 @@ substring search across all five output formats.
 
 ---
 
-### Phase 6 — Media and third-party boundaries
+### Phase 6 — Media and third-party boundaries ✅
+
+**16 tests added** (`media-boundaries.test.ts`). Suite: 489 → 505. **Three real
+bugs, one of them the most serious finding so far.**
+
+1. **Stored XSS on the public share page.** `LinkSection.url` was
+   `z.string().url()`, and Zod defers to `new URL()` — which considers
+   `javascript:alert(1)`, `data:text/html,…` and `vbscript:` perfectly
+   well-formed. The public page renders `<a href="${esc(url)}">`, and `esc`
+   does nothing to a scheme because those payloads contain no markup.
+
+   So any Contributor could store one, the owner would never see it in their own
+   client, and it would ship as a clickable script to every **unauthenticated**
+   visitor of the share link — which is the acquisition channel, passed around
+   in group chats. Confirmed with a request that returned 201.
+
+   Fixed at both ends: the contract now refuses any scheme but http(s), and the
+   renderer checks again before emitting an href, degrading a bad link to plain
+   text. Both were needed — the contract protects new rows, but anything written
+   before the fix is still in the database and still ships to strangers.
+
+2. **An oversized upload was a 500.** `raw({ limit })` rejects the body before
+   the route sees it, and body-parser's `entity.too.large` had no mapping in the
+   error handler. A user attaching a large photo got an opaque server error
+   instead of being told the file is too big. Now 413.
+
+3. **Attribution was omitted rather than null.** A device upload returned no
+   `attribution`/`attributionUrl`/`provider` keys at all, so a client could not
+   distinguish "no credit required" from "the field is missing". FR-MEDIA-03 is
+   a licence obligation, so those keys are now always present, explicitly null.
+
+**A requirement that turns out not to exist.** `FR-SEC-05` specifies the server
+fetching OpenGraph metadata and sandboxing the fetch against SSRF. There is no
+such fetch — the client supplies `url`, `host`, `title` and `desc`. That is
+*better* for SSRF (no surface at all) and worse for trust (all four fields are
+attacker-controlled). Recorded above rather than built.
+
+**Verified rather than assumed:** a GIF/HTML polyglot is either refused or
+stored as an image served with `nosniff` and an `image/*` content type; a
+PNG-signature-only body is refused; stored bytes carry `nosniff` and a
+`Content-Disposition`; quota is per user, frees on delete, and does not leak
+across users; image search degrades to an empty state with no provider key while
+upload keeps working; another user's bytes 404 rather than 403 on read, delete
+and patch alike.
+
+**A limit pinned by a test rather than a comment:** a PNG round-trips
+byte-identical, because EXIF stripping covers JPEG only. If `sharp` is ever
+added, that test is the one that should change.
+
+---
+
+### Phase 6 — original scope
 
 - Magic bytes decide type, never `Content-Type` (tested) — extend to a
   polyglot file valid as both GIF and HTML, and a zero-byte file.
@@ -710,7 +876,59 @@ substring search across all five output formats.
 
 ---
 
-### Phase 7 — Cross-cutting
+### Phase 7 — Cross-cutting ✅
+
+**21 tests added** (`cross-cutting.test.ts`). Suite: 505 → 526. **One real bug,
+and two findings that turned out to be good news.**
+
+**The bug: malformed JSON was a 500.** `express.json()` rejects a broken body
+with `type: 'entity.parse.failed'`, which had no mapping — so a client sending
+`{"destination": "Kyoto"` (one brace short) got `INTERNAL`. That tells the
+caller to retry something that will never work. Now 400 `VALIDATION_FAILED`,
+alongside `encoding.unsupported`. This is the same class as the oversized-upload
+500 fixed in Phase 6: **body-parser errors bypass every route, so nothing in the
+module layer could ever have caught them.** Both are now handled in one place.
+
+**Good news 1: the ledger cannot be corrupted, even deliberately.** The obvious
+way to test reconciliation is to knock a ledger out of balance and watch it get
+caught. That turns out to be impossible — the deferred constraint trigger
+rejects the write outright, so a residual never reaches the table. The test now
+asserts *that*, which is a stronger property than reconciliation noticing after
+the fact, and it reframes the cron sweep as defence-in-depth rather than the
+only thing standing between the ledger and a wrong number.
+
+**Good news 2: the scheduled workflow is correct.** A bodyless POST to
+`/internal/cron/tick` is refused with 400 rather than defaulting to `daily`. I
+checked `.github/workflows/cron.yml` before assuming that was a bug — it posts
+`-d '{"group":"…"}'`, so the deployed caller is fine. Pinned by a test, so a
+future edit that drops the `-d` fails loudly instead of running the wrong group.
+
+**Newly covered, having had none:**
+
+- **`/internal/cron` had zero tests.** Now: a missing, wrong, and malformed
+  secret are all refused; the secret works by `X-Cron-Secret` *and* by bearer
+  token; each of the three documented groups is accepted; an undocumented group
+  is refused; `inline: true` runs reconciliation and reports; and the endpoint
+  is rate limited at 20/minute, far tighter than the signed-in API.
+- **Idempotency on the five routes that had none.** Expenses replay instead of
+  double-charging; settlements replay and refuse the same key with different
+  money (`CONFLICT_IDEMPOTENCY_MISMATCH`); a variant does not fork twice; keys
+  stay scoped per user.
+- **Optimistic locking on days**, including that a stale write leaves the
+  winning edit intact rather than clobbering it, and that every accepted write
+  advances the version so a retry cannot succeed twice.
+- **Concurrency against one ledger:** six simultaneous expense creations all
+  succeed and `SUM(net) = 0` still holds; a settle-up read racing an expense
+  write leaves the invariant intact.
+- **The error taxonomy:** every error carries a `code`, a `message` and a
+  `requestId`; a malformed `amountMinor` is 400 not the 500 it once was (the
+  regression test for the `moneyRefinement` fix); unknown routes and unsupported
+  methods answer in the same shape.
+- **`/health`** reports database reachability without authentication.
+
+---
+
+### Phase 7 — original scope
 
 **Idempotency (§8.8)** — applied at six sites; tested at one.
 - Replay returns the stored response with `Idempotent-Replay: true` (tested on
@@ -757,7 +975,56 @@ and a broadcast arriving only after commit.
 
 ---
 
-### Phase 8 — The nine critical journeys (PRD §15.2)
+### Phase 8 — The nine critical journeys (PRD §15.2) ✅
+
+**9 tests added** (`journeys.test.ts`). Suite: 526 → 535. **No new bugs — and
+that is the result worth reporting.**
+
+Eight of the nine passed on the first run. The ninth failed on my own wrong
+guess at a query parameter (`?view=archived`; the contract says `archive`).
+Nothing in the product broke.
+
+That is meaningful rather than anticlimactic. These are the only tests that
+cross module boundaries — every other test in the suite builds its world with
+factories that write SQL directly and then exercises one module, which leaves
+the *handoffs* as the least-tested code in the system. Seven earlier phases had
+already fixed 23 bugs, several of them precisely at these seams (a block
+deletion unlinking an expense, an invite acceptance minting a participant, a
+claim moving a ledger identity). The journeys passing first time says those
+fixes were the right ones.
+
+Each journey is built end to end through the API, with SQL used only to plant an
+invite token — which the API deliberately never exposes, since only its hash is
+stored.
+
+| # | Journey | Result |
+|---|---|---|
+| 1 | trip → 5 blocks over 2 days → invite → accept → both edit → export PDF | ✅ real `%PDF-` bytes |
+| 2 | fork → modify → compare → promote → previous main intact | ✅ except compare |
+| 3 | share link → fetched logged-out → guest comment → visible to the crew | ✅ |
+| 4 | delete block, day and trip; restore each | ✅ full restoration |
+| 5 | folder → archive → restore from archive | ✅ folder counts follow |
+| 6 | date change with days present, all four strategies | ✅ |
+| 7 | 6 expenses, 4 participants, 5 split methods, 2 currencies → settled | ✅ |
+| 8 | planned cost → linked actual → delete block → expense survives | ✅ |
+| 9 | claim a placeholder → full ledger history transfers | ✅ balances identical |
+
+**Journey 2 is the one that cannot complete.** `FR-VAR-05` (compare variants)
+has no route, so the journey asserts the compare endpoint returns 404 and
+carries a message telling whoever builds it to come back and assert the diff.
+The rest of the journey — fork, modify, promote, previous main intact — runs.
+
+**Journey 7 is the one worth reading.** All five split methods against four
+participants, plus a sixth expense in JPY with a frozen rate; every expense's
+shares are asserted to sum exactly to its own total, `SUM(net) = 0` holds,
+simplification stays within n−1 transfers, and then every proposed transfer is
+actually recorded and confirmed until each participant's net is exactly `0` and
+settle-up proposes nothing further. That is PRD §15.2 flow 7 end to end,
+including the "trip reaches Settled" close.
+
+---
+
+### Phase 8 — original scope
 
 Each is **one test**, building its world through the API rather than through
 factories — because the handoffs between modules are the point. These are the
