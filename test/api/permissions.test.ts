@@ -843,7 +843,13 @@ describe('idempotency stores the response before answering (§8.8)', () => {
     const user = await createUser();
 
     // No delay at all between the two: any window is a failing window.
-    for (let attempt = 0; attempt < 10; attempt += 1) {
+    //
+    // Three rounds, not ten. Before the fix this needed repetition because the
+    // failure was probabilistic — it depended on whether a fire-and-forget
+    // write landed first. Now the write is awaited, so the ordering is
+    // structural and one round would prove it; three is cheap insurance
+    // against a regression that reintroduces timing.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
       const key = `retry-${attempt}-${user.id}`;
 
       const first = await authed(user.token)
