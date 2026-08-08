@@ -192,10 +192,18 @@ before R2 activates. You are not charged inside the free allowance; if that is
 not acceptable, use B2, which needs no card.
 
 1. Cloudflare dashboard → **R2** → activate (card required)
-2. **Create bucket** → `wandrly-media`, keep it private
-3. **Manage R2 API Tokens** → create a token with **Object Read & Write**
-4. Note the **Account ID** — the endpoint is
-   `https://<account-id>.r2.cloudflarestorage.com`, region `auto`
+2. **Create bucket** → `wandrly-media`
+3. Bucket → **Settings** → confirm **Public Development URL** is **disabled**.
+   If enabled, the `r2.dev` hostname serves every object to anyone with the
+   URL — receipts included — no matter what the API does. It is a different
+   hostname from the S3 endpoint, so `npm run storage:check` cannot see it.
+4. **Manage R2 API Tokens** → create a token with **Object Read & Write**.
+   Plain "Object Read" authenticates fine and fails only on the first upload,
+   with a bare `AccessDenied` that looks like a wrong key.
+5. Note the **Account ID** — the endpoint is
+   `https://<account-id>.r2.cloudflarestorage.com`, region `auto`.
+   Cloudflare displays the S3 URL **with the bucket appended**; drop that part,
+   as the driver adds the bucket itself.
 
 **Backblaze B2** — no card, slightly less egress headroom.
 
@@ -230,8 +238,10 @@ names the likely cause when a step fails. Credentials that parse are not
 credentials that work: a token scoped to the wrong bucket or missing Object
 Read & Write passes every startup check and fails on the first photo.
 
-- [ ] One of: Supabase bucket, R2 bucket, or B2 bucket created — and private
-- [ ] If S3: all three `S3_*` credentials set together
+- [x] R2 bucket `wandrly-media` created — **done 2026-08-08**
+- [x] Public Development URL disabled, verified: anonymous fetch returns 401
+- [x] Token has Object Read & Write
+- [x] All three `S3_*` credentials set, `npm run storage:check` green
 
 ---
 
