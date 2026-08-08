@@ -381,17 +381,15 @@ describe('every ceiling is enforced, and driven by configuration (PRD D-10)', ()
     const ceiling = limits.daysPerVariant;
     const existing = canvas.days.length;
 
-    // Appended one at a time, deliberately. Adding days concurrently collides
-    // on `days_variant_number_uq`: the service computes the next day number
-    // from a max() and inserts, so two writers pick the same number and the
-    // loser gets an opaque DOMAIN_RULE_VIOLATION. See the sibling test below,
-    // which pins that behaviour rather than hiding it here.
-    for (let index = 0; index < ceiling - existing - 1; index += 1) {
-      await authed(owner.token)
+    // Filled in parallel batches: day numbering is serialised by a row lock on
+    // the variant, so concurrent appends no longer collide. This test would
+    // have had to run one at a time before that fix.
+    await inBatches(ceiling - existing - 1, (index) =>
+      authed(owner.token)
         .post(`/v1/trips/${trip.id}/variants/${mainVariantId}/days`)
         .send({ title: `Day ${index}` })
-        .expect(201);
-    }
+        .expect(201),
+    );
 
     await authed(owner.token)
       .post(`/v1/trips/${trip.id}/variants/${mainVariantId}/days`)
@@ -409,14 +407,16 @@ describe('every ceiling is enforced, and driven by configuration (PRD D-10)', ()
   it('never lets two concurrent day appends corrupt the numbering', async () => {
     const { owner, trip, mainVariantId } = await scaffold();
 
-    // Two collaborators press "Add a day" at the same moment. The service
-    // derives the next day number from a max() and inserts, so both pick the
-    // same number and the database's uniqueness constraint catches it.
+    // Four collaborators press "Add a day" at the same moment.
     //
-    // The invariant that matters is that numbering stays contiguous and no day
-    // is lost — which holds. What the loser gets is an opaque
-    // DOMAIN_RULE_VIOLATION rather than either a retry or a clean append, and
-    // with real-time co-editing (FR-COLLAB-06) that is reachable in normal use.
+    // Day numbers come from `count + 1` read inside the transaction, so under
+    // READ COMMITTED every one of these read the same count and inserted the
+    // same number — colliding on `days_variant_number_uq`. Nothing was ever
+    // corrupted, because the constraint caught it, but the losers got an
+    // opaque DOMAIN_RULE_VIOLATION naming a database index. With real-time
+    // co-editing (FR-COLLAB-06) this is ordinary use, not an edge case.
+    //
+    // A row lock on the variant now serialises numbering, so all four land.
     const results = await Promise.all(
       Array.from({ length: 4 }, (_, i) =>
         authed(owner.token)
@@ -425,11 +425,11 @@ describe('every ceiling is enforced, and driven by configuration (PRD D-10)', ()
       ),
     );
 
-    const created = results.filter((r) => r.status === 201).length;
-    expect(created, 'no concurrent append succeeded at all').toBeGreaterThan(0);
-    for (const rejected of results.filter((r) => r.status !== 201)) {
-      expect([409, 422]).toContain(rejected.status);
-    }
+    const statuses = results.map((r) => r.status);
+    expect(
+      statuses,
+      `concurrent appends were refused: ${JSON.stringify(results.map((r) => r.body))}`,
+    ).toStrictEqual([201, 201, 201, 201]);
 
     const { body } = await authed(owner.token)
       .get(`/v1/trips/${trip.id}/canvas`)

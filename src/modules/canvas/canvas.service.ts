@@ -295,6 +295,7 @@ export class CanvasService {
 
     await withTransaction(async (tx) => {
       await this.requireVariant(tx, access.tripId, variantId);
+      await this.lockVariantForNumbering(tx, variantId);
 
       const count = await this.deps.canvas.countDays(tx, variantId);
       if (count >= limits.daysPerVariant) {
@@ -352,6 +353,7 @@ export class CanvasService {
 
     await withTransaction(async (tx) => {
       const day = await this.requireDay(tx, access.tripId, dayId);
+      await this.lockVariantForNumbering(tx, day.variantId);
 
       await tx.delete(days).where(eq(days.id, dayId));
 
@@ -391,6 +393,7 @@ export class CanvasService {
 
     await withTransaction(async (tx) => {
       const day = await this.requireDay(tx, access.tripId, dayId);
+      await this.lockVariantForNumbering(tx, day.variantId);
 
       const count = await this.deps.canvas.countDays(tx, day.variantId);
       if (count >= limits.daysPerVariant) {
@@ -731,6 +734,24 @@ export class CanvasService {
     const variant = await this.deps.canvas.findVariant(exec, variantId);
     if (!variant || variant.tripId !== tripId) throw new NotFoundError('Variant');
     return variant;
+  }
+
+  /**
+   * Serialise day-number assignment for one variant.
+   *
+   * Day numbers come from `count + 1` read inside the transaction, and under
+   * READ COMMITTED two concurrent appends both read N and both insert N+1 —
+   * colliding on `days_variant_number_uq`. The database caught it, so nothing
+   * was ever corrupted, but the loser got an opaque DOMAIN_RULE_VIOLATION
+   * naming a constraint. With real-time co-editing (FR-COLLAB-06), two people
+   * pressing "Add a day" together is ordinary use, not an edge case.
+   *
+   * A row lock on the variant is the smallest fix that removes the race: it
+   * serialises only appends to the SAME variant, so parallel plans and
+   * different trips are unaffected, and it needs no retry loop.
+   */
+  private async lockVariantForNumbering(exec: Executor, variantId: string): Promise<void> {
+    await exec.execute(sql`select id from variants where id = ${variantId} for update`);
   }
 
   private async requireDay(exec: Executor, tripId: string, dayId: string) {
