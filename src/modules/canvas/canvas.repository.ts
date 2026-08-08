@@ -148,11 +148,17 @@ export class CanvasRepository {
     return rows[0] ?? null;
   }
 
-  /** Block lookup scoped to a trip, via day → variant. */
+  /**
+   * Block lookup scoped to a trip, via day → variant.
+   *
+   * `includeDeleted` exists for the restore path, whose subject is by
+   * definition soft-deleted and therefore invisible to the default filter.
+   */
   async findBlockInTrip(
     exec: Executor,
     tripId: string,
     blockId: string,
+    options: { includeDeleted?: boolean } = {},
   ): Promise<BlockRow | null> {
     const rows = await exec
       .select({ block: blocks })
@@ -163,7 +169,7 @@ export class CanvasRepository {
         and(
           eq(blocks.id, blockId),
           eq(variants.tripId, tripId),
-          isNull(blocks.deletedAt),
+          options.includeDeleted ? undefined : isNull(blocks.deletedAt),
         ),
       )
       .limit(1);

@@ -127,7 +127,11 @@ ledgerRouter.post(
 ledgerRouter.delete(
   '/trips/:tripId/expenses/:id',
   validate({ params: TripAndIdParam }),
-  withTripAccess('expense:edit-any'),
+  // 'expense:create' is the coarse gate — it admits exactly the roles PRD §8
+  // lets touch an expense at all. Gating on 'expense:edit-any' here refused a
+  // Contributor their own expense, because the middleware has no resource to
+  // resolve '-any' down to '-own' against. The service does that check.
+  withTripAccess('expense:create'),
   async (req, res) => {
     const { id } = validated.params(req, TripAndIdParam);
     await ledgerService.deleteExpense(accessOf(req), id);
@@ -138,7 +142,7 @@ ledgerRouter.delete(
 ledgerRouter.post(
   '/trips/:tripId/expenses/:id/restore',
   validate({ params: TripAndIdParam }),
-  withTripAccess('expense:edit-any'),
+  withTripAccess('expense:create'),
   async (req, res) => {
     const { id } = validated.params(req, TripAndIdParam);
     await ledgerService.restoreExpense(accessOf(req), id);

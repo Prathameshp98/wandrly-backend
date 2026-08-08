@@ -3,7 +3,7 @@
 Honest accounting of what is built, what is not, and the order to continue in.
 Tracks the phases in `TECHNICAL_DESIGN.md` §17.
 
-**Verified working:** 388 tests (199 unit + 189 API) · `tsc --noEmit` and ESLint
+**Verified working:** 458 tests (199 unit + 259 API) · `tsc --noEmit` and ESLint
 clean · 25 tables migrated · invariant triggers reject bad data · auth guards
 return 401/403/404 correctly · all 99 operations documented in `openapi.json`,
 enforced by a test · **a full user journey — folder → trip → participant →
@@ -12,8 +12,13 @@ expense → balances → settle-up — completes over HTTP with no SQL.**
 **Every module is now implemented.** What remains is deployment, a handful of
 named gaps below, and the test flake.
 
-⚠️ **The suite has a known ~8% flake.** See "Known shortcuts" below. It is test
-infrastructure, not product code, but it is not fixed and should not be ignored.
+⚠️ **The suite has a known ~5% flake** (re-measured over 69 runs). See "Known
+shortcuts" below. It is test infrastructure, not product code, but it is not
+fixed and should not be ignored.
+
+📋 **`E2E_TEST_PLAN.md`** tracks the phased end-to-end coverage pass. Phases 0
+and 1 are complete; it also records six requirements that have no route to test
+at all.
 
 ---
 
@@ -271,6 +276,28 @@ sizes (so FR-NFR-PERF-08 is unmet), no real blurhash (an average tone stands in)
 and EXIF stripping covers JPEG only. All three are fixed by adding `sharp`, at
 the cost of a much larger container — worth doing on a paid instance.
 
+### Route contract & permission matrix ✅
+`test/api/route-contract.test.ts` walks the live router stack and fails any
+mutating route missing `validate()`, plus any `:tripId` route missing its access
+guard — the test §4.4 promised. `test/api/permissions.test.ts` drives PRD §8 row
+by row over HTTP for all five roles.
+
+**Five real bugs found by writing these, all fixed:**
+1. **`CanvasService.restoreBlock` ignored the trip entirely** (`void access;`),
+   so anyone who could edit any trip could resurrect a soft-deleted block from
+   any other trip.
+2. **`LedgerService.restoreExpense` had the same hole on financial records** —
+   its sibling `deleteExpense` checked `tripId`, restore never got the line.
+3. **A Viewer could export the whole group ledger as CSV.** PRD §8 has two
+   export rows with different Viewer columns; the route used the permissive one,
+   and the CSV query has no participant filter. The "own shares only" rule was
+   enforced on the list endpoint and bypassed by the export.
+4. **A Contributor could not delete their own expense.** The route gated on
+   `expense:edit-any`, which the middleware cannot resolve to `-own` without the
+   resource — making PRD §8's "Own only" cell unreachable.
+5. **`GET /share` handed the share slug to every role**, when the slug is the
+   capability PRD §8 restricts to Owner and Editor.
+
 ### Phase 8 — Ledger ✅ (built early: highest risk, hardest to retrofit)
 Participants including account-less placeholders and reassignment-on-removal;
 expenses with frozen FX and dual-currency allocation; all five split methods;
@@ -287,7 +314,7 @@ of these — what is missing is repository/service/route code.
 
 | Phase | Module | Notes |
 |---|---|---|
-| — | **Route contract test** | §4.4 promises a test walking the router stack to fail any mutating route missing `validate()`. Worth adding before the route count grows. |
+| — | *(nothing outstanding)* | The route contract test §4.4 promised now exists — see below. |
 
 ---
 

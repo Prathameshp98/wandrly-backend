@@ -75,6 +75,24 @@ export abstract class BaseRepository<TRow extends { id: string }> {
   }
 
   /**
+   * Find a row whether or not it is soft-deleted.
+   *
+   * `restore` is the one operation whose subject is *always* invisible to
+   * `findById`, so a restore path that wants to authorize before acting has no
+   * other way to see what it is about to act on. Without this, `restore` runs
+   * on a bare id — which is how a caller ends up restoring a row belonging to
+   * someone else's trip.
+   */
+  async findByIdIncludingDeleted(exec: Executor, id: string): Promise<TRow | null> {
+    const rows = (await exec
+      .select()
+      .from(this.table)
+      .where(eq(this.idColumn, id))
+      .limit(1)) as unknown as TRow[];
+    return rows[0] ?? null;
+  }
+
+  /**
    * Optimistic update (§5.9).
    *
    * Zero rows affected means the caller held a stale version, which surfaces as

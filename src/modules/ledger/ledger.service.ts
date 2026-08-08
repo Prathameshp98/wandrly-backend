@@ -33,7 +33,7 @@ import {
   parseRate,
   simplify,
 } from '../../money/index';
-import { ledgerScope, type TripAccess } from '../../platform/policy/index';
+import { assert, ledgerScope, type TripAccess } from '../../platform/policy/index';
 import { decryptField, encryptField } from '../../platform/crypto/index';
 import type {
   AddParticipantBody,
@@ -320,6 +320,11 @@ export class LedgerService {
       const expense = await this.deps.expenses.findById(tx, expenseId);
       if (!expense || expense.tripId !== access.tripId) throw new NotFoundError('Expense');
 
+      // PRD §8 "Edit / delete an expense" is Own-only for a Contributor, so the
+      // route can only gate coarsely — the real check needs the expense's
+      // author, which the middleware has not loaded. Same shape as blocks.
+      assert(access, 'expense:edit-any', { createdBy: expense.createdBy });
+
       await this.deps.expenses.softDelete(tx, expenseId);
 
       await this.deps.activity.record(tx, {
@@ -349,6 +354,15 @@ export class LedgerService {
   /** Undo support for the 10-second toast (FR-SPLIT-42). */
   async restoreExpense(access: TripAccess, expenseId: string): Promise<void> {
     await withTransaction(async (tx) => {
+      // Scope to the trip in the URL before touching anything. Restoring by
+      // bare id let anyone who owned *any* trip resurrect a soft-deleted
+      // expense from *any other* trip, since the middleware only ever
+      // authorized them against the trip they named.
+      const expense = await this.deps.expenses.findByIdIncludingDeleted(tx, expenseId);
+      if (!expense || expense.tripId !== access.tripId) throw new NotFoundError('Expense');
+
+      assert(access, 'expense:edit-any', { createdBy: expense.createdBy });
+
       const restored = await this.deps.expenses.restore(tx, expenseId);
       if (!restored) throw new NotFoundError('Expense');
 

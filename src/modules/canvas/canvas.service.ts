@@ -571,15 +571,26 @@ export class CanvasService {
   }
 
   async restoreBlock(access: TripAccess, blockId: string): Promise<void> {
-    const rows = await db
-      .select({ id: blocks.id })
-      .from(blocks)
-      .where(eq(blocks.id, blockId))
-      .limit(1);
-    if (rows.length === 0) throw new NotFoundError('Block');
+    // Scope to the trip in the URL. Looking the block up by bare id — and then
+    // discarding `access` entirely — let anyone who could edit *any* trip
+    // resurrect a soft-deleted block from *any other* trip.
+    const block = await this.deps.canvas.findBlockInTrip(db, access.tripId, blockId, {
+      includeDeleted: true,
+    });
+    if (!block) throw new NotFoundError('Block');
+
+    assert(access, 'block:edit-any', { createdBy: block.createdBy });
 
     await db.update(blocks).set({ deletedAt: null }).where(eq(blocks.id, blockId));
-    void access;
+
+    const broadcast = new DeferredBroadcast();
+    broadcast.queue({
+      kind: 'block.restored',
+      tripId: access.tripId,
+      entityId: blockId,
+      actorId: access.userId,
+    });
+    broadcast.flush();
   }
 
   /**

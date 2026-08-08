@@ -73,7 +73,12 @@ exportsRouter.get(
 exportsRouter.get(
   '/trips/:tripId/expenses/export.csv',
   validate({ params: TripIdParam }),
-  withTripRead('export:run'),
+  // PRD §8 has two distinct rows: "Export" admits every role, but "Export the
+  // expense report" denies a Viewer. Gating this on 'export:run' handed a
+  // Viewer the whole group ledger as CSV — the query is trip-scoped, not
+  // participant-scoped — flatly contradicting "View the expense ledger:
+  // Viewer = own shares only".
+  withTripRead('expense:view'),
   async (req, res) => {
     const csv = await exportsService.expensesCsv(accessOf(req));
     res

@@ -43,7 +43,10 @@ const toShareDTO = (link: {
 sharingRouter.get(
   '/trips/:tripId/share',
   validate({ params: TripIdParam }),
-  withTripRead('trip:view'),
+  // Reading the link hands over the slug, which IS the capability to share the
+  // trip with the world. PRD §8 restricts "Manage share link" to Owner and
+  // Editor, and handing a Viewer the URL to paste elsewhere is that same act.
+  withTripRead('share:manage'),
   async (req, res) => {
     const link = await sharingService.getLink(accessOf(req));
     res.json(link ? toShareDTO(link) : null);

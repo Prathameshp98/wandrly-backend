@@ -23,6 +23,7 @@ export type RealtimeEventKind =
   | 'block.created'
   | 'block.updated'
   | 'block.deleted'
+  | 'block.restored'
   | 'block.moved'
   | 'variant.created'
   | 'variant.promoted'

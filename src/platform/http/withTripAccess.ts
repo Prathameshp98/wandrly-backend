@@ -77,6 +77,24 @@ export interface TripAccessOptions {
 }
 
 /**
+ * Marks a handler as an authorization guard.
+ *
+ * The compiler already stops a route reaching a service without a `TripAccess`
+ * (see the header comment), but it cannot see a route that never calls a
+ * service at all. `route-contract.test.ts` walks the router stack looking for
+ * this, which catches the gap the type system structurally cannot.
+ */
+const TRIP_GUARD = Symbol.for('wandrly.tripAccessGuard');
+
+function markGuard(handler: RequestHandler): RequestHandler {
+  Object.defineProperty(handler, TRIP_GUARD, { value: true });
+  return handler;
+}
+
+export const isTripAccessGuard = (fn: unknown): boolean =>
+  typeof fn === 'function' && TRIP_GUARD in (fn as object);
+
+/**
  * Load access for `:tripId` and assert `action`.
  *
  * @example
@@ -91,7 +109,7 @@ export function withTripAccess(
 ): RequestHandler {
   const param = options.param ?? 'tripId';
 
-  return async (req, _res, next) => {
+  return markGuard(async (req, _res, next) => {
     try {
       const tripId = req.params[param];
       if (typeof tripId !== 'string' || !tripId) throw new NotFoundError('Trip');
@@ -107,7 +125,7 @@ export function withTripAccess(
     } catch (error) {
       next(error);
     }
-  };
+  });
 }
 
 /** Same, but permits archived trips — used by read routes. */
@@ -128,7 +146,7 @@ export function withResolvedTripAccess(
 ): RequestHandler {
   const param = options.param ?? 'id';
 
-  return async (req, _res, next) => {
+  return markGuard(async (req, _res, next) => {
     try {
       const resourceId = req.params[param];
       if (typeof resourceId !== 'string' || !resourceId) {
@@ -149,7 +167,7 @@ export function withResolvedTripAccess(
     } catch (error) {
       next(error);
     }
-  };
+  });
 }
 
 /** Non-null accessor, for handlers that run behind the middleware above. */

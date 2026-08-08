@@ -156,7 +156,69 @@ candidates fired, and that single line likely closes this out.
 
 ---
 
-### Phase 1 — Permission matrix (PRD §8)
+### Phase 1 — Permission matrix (PRD §8) ✅
+
+**49 tests added** (`permissions.test.ts`, `route-contract.test.ts`). Suite: 409
+→ 458. All 99 operations now reached. **Five real bugs found, all fixed.**
+
+Two were security holes, and both had the same root cause — an authorization
+check written against a bare id instead of against the trip in the URL:
+
+1. **Cross-trip block restore.** `CanvasService.restoreBlock` looked the block
+   up by id alone and then wrote `void access;`, discarding the caller's trip
+   entirely. Anyone who could edit *any* trip could resurrect a soft-deleted
+   block from *any other* trip. Now scoped through the day → variant → trip
+   join, with the author check `deleteBlock` already had.
+2. **Cross-trip expense restore.** `LedgerService.restoreExpense` passed the id
+   straight to `BaseRepository.restore`, which filters on id only — so the same
+   hole existed on financial records. Its sibling `deleteExpense` *did* check
+   `expense.tripId !== access.tripId`; restore simply never got the same line.
+   Added `findByIdIncludingDeleted`, since restore's subject is by definition
+   invisible to `findById` and that is precisely why it was skipped.
+
+3. **A Viewer could export the entire group ledger.** `GET
+   /expenses/export.csv` was gated on `export:run`, which every role holds. PRD
+   §8 has *two* export rows and they differ: "Export" admits everyone, "Export
+   the expense report" denies a Viewer. The CSV query is trip-scoped with no
+   participant filter, so it returned every share of every expense — directly
+   contradicting "View the expense ledger: Viewer = own shares only", which
+   `ledger.test.ts` already proved for the *list* endpoint. The rule was
+   enforced in one place and bypassed in another. Now gated on `expense:view`.
+
+4. **A Contributor could not delete their own expense.** The route gated on
+   `expense:edit-any`, but the middleware has no resource with which to resolve
+   `-any` down to `-own`, so `can()` returned false for a Contributor even on an
+   expense they created — making PRD §8's "Own only" cell unreachable and
+   `expense:edit-own` dead code. Fixed with the pattern blocks already use: a
+   coarse route gate (`expense:create`), then the real check in the service with
+   the expense's author in hand.
+
+5. **The share link's slug was readable by every role.** `GET /share` was gated
+   on `trip:view`. The slug *is* the capability to publish the trip, so handing
+   it to a Viewer is the act PRD §8 restricts to Owner and Editor. Now
+   `share:manage`. (Judgement call rather than a stated requirement — recorded
+   as such.)
+
+**Also delivered:** `route-contract.test.ts`, the §4.4 test
+`IMPLEMENTATION_STATUS` listed as the last outstanding item. It walks the router
+stack and fails any mutating route without `validate()`, plus a twin that fails
+any `:tripId` route without an access guard. `isValidationMiddleware` already
+existed and was used by nothing; the guard needed a matching marker.
+
+It found one guardless route — `POST /trips/:tripId/restore` — which turned out
+to be deliberate and correct (the trip is soft-deleted, so `loadTripAccess`
+cannot see it; the service re-checks ownership). Exempted **with** a paired test
+asserting the service-level check, since an exemption otherwise removes the only
+pressure on that route.
+
+**Two expectations of mine were wrong, and the code was right:** marking another
+user's notification read, and reordering with a trip id you cannot see, both
+return 204. Both are scoped away in SQL and have no cross-user effect. The tests
+now assert that invariant rather than a status code I had guessed.
+
+---
+
+### Phase 1 — original scope
 
 `policy.test.ts` has 131 tests asserting the policy *engine*. That is not the
 same as asserting every *route* consults it. A route that forgets
