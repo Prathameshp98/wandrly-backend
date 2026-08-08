@@ -19,7 +19,7 @@
  * nothing, so ordering between roles does not matter either.
  */
 
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { authed } from '../support/api';
 import { closeTestDatabase, resetDatabase } from '../support/db';
@@ -68,10 +68,12 @@ async function buildWorld(): Promise<World> {
   const owner = await createUser({ displayName: 'Owner' });
   const trip = await createTrip({ ownerId: owner.id, baseCurrency: 'INR' });
 
-  const editor = await addMember(trip.id, 'EDITOR');
-  const contributor = await addMember(trip.id, 'CONTRIBUTOR');
-  const viewer = await addMember(trip.id, 'VIEWER');
-  const outsider = await createUser({ displayName: 'Outsider' });
+  const [editor, contributor, viewer, outsider] = await Promise.all([
+    addMember(trip.id, 'EDITOR'),
+    addMember(trip.id, 'CONTRIBUTOR'),
+    addMember(trip.id, 'VIEWER'),
+    createUser({ displayName: 'Outsider' }),
+  ]);
 
   const ownerToken = owner.token;
   const as = (token: string) => authed(token);
@@ -91,27 +93,33 @@ async function buildWorld(): Promise<World> {
     .send({ name: 'Rainy day', forkFromVariantId: trip.mainVariantId })
     .expect(201);
 
-  const { body: comment } = await as(ownerToken)
-    .post(`/v1/trips/${trip.id}/comments`)
-    .send({ body: 'Worth an early start.', blockId: block.id })
-    .expect(201);
-
-  const { body: suggestion } = await as(contributor.token)
-    .post(`/v1/trips/${trip.id}/suggestions`)
-    .send({ dayId: day.id, proposedBlock: { type: 'NOTE', title: 'Coffee first' } })
-    .expect(201);
-
-  const { body: packingItem } = await as(ownerToken)
-    .post(`/v1/trips/${trip.id}/packing`)
-    .send({ category: 'Documents', label: 'Passport' })
-    .expect(201);
-
-  const { body: invite } = await as(ownerToken)
-    .post(`/v1/trips/${trip.id}/invites`)
-    .send({ emails: ['someone@example.com'], role: 'EDITOR' })
-    .expect(201);
-
-  const placeholderId = await addPlaceholder(trip.id, 'Placeholder', owner.id);
+  // These four touch different tables and depend only on the day/block above,
+  // so serialising them just adds four round trips to every fixture.
+  const [
+    { body: comment },
+    { body: suggestion },
+    { body: packingItem },
+    { body: invite },
+    placeholderId,
+  ] = await Promise.all([
+    as(ownerToken)
+      .post(`/v1/trips/${trip.id}/comments`)
+      .send({ body: 'Worth an early start.', blockId: block.id })
+      .expect(201),
+    as(contributor.token)
+      .post(`/v1/trips/${trip.id}/suggestions`)
+      .send({ dayId: day.id, proposedBlock: { type: 'NOTE', title: 'Coffee first' } })
+      .expect(201),
+    as(ownerToken)
+      .post(`/v1/trips/${trip.id}/packing`)
+      .send({ category: 'Documents', label: 'Passport' })
+      .expect(201),
+    as(ownerToken)
+      .post(`/v1/trips/${trip.id}/invites`)
+      .send({ emails: ['someone@example.com'], role: 'EDITOR' })
+      .expect(201),
+    addPlaceholder(trip.id, 'Placeholder', owner.id),
+  ]);
 
   // An expense the OWNER paid, split across the owner and the placeholder, so
   // there is a real non-zero balance for the settlement below to clear.
@@ -422,45 +430,94 @@ function send(token: string, testCase: MatrixCase, world: World) {
 }
 
 describe('PRD §8 permission matrix, enforced over HTTP', () => {
-  for (const testCase of CASES) {
-    const denied = ALL.filter((role) => !testCase.allowed.includes(role));
+  /**
+   * One world for every refusal assertion in this block.
+   *
+   * A refused request — 403 for a denied role, 404 for a non-member — changes
+   * nothing, so none of these cases can disturb another. Building a fresh
+   * fixture per case cost ~35 world builds and 50s of wall clock to prove
+   * something the same fixture proves in one.
+   *
+   * Only the *permitted* cases mutate, and they get their own worlds below.
+   */
+  let refusals: World;
 
-    it(`${testCase.row} — permits ${testCase.allowed.join('/')}, refuses ${
-      denied.join('/') || 'nobody'
-    }`, async () => {
-      const world = await buildWorld();
+  beforeAll(async () => {
+    refusals = await buildWorld();
+  });
 
-      // Denied roles first: a 403 mutates nothing, so this cannot disturb the
-      // permitted cases that follow.
-      for (const role of denied) {
-        const response = await send(world.tokens[role], testCase, world);
-        expect(
-          response.status,
-          `${role} must be refused ${testCase.method.toUpperCase()} ${testCase.path(world)}`,
-        ).toBe(403);
-      }
-
-      for (const role of testCase.allowed) {
-        const response = await send(world.tokens[role], testCase, world);
-        expect(
-          response.status,
-          `${role} must not be refused ${testCase.method.toUpperCase()} ${testCase.path(world)}`,
-        ).not.toBe(403);
-      }
-    });
-  }
-
-  it('never answers 403 to a non-member — a 403 would confirm the trip exists', async () => {
-    const world = await buildWorld();
+  it('refuses every role PRD §8 denies, on every action', async () => {
+    const failures: string[] = [];
 
     for (const testCase of CASES) {
-      const response = await send(world.outsiderToken, testCase, world);
-      expect(
-        response.status,
-        `${testCase.method.toUpperCase()} ${testCase.path(world)} leaked existence to a non-member`,
-      ).toBe(404);
+      for (const role of ALL.filter((candidate) => !testCase.allowed.includes(candidate))) {
+        const response = await send(refusals.tokens[role], testCase, refusals);
+        if (response.status !== 403) {
+          failures.push(
+            `${role} got ${response.status} (want 403) on ${testCase.method.toUpperCase()} ` +
+              `${testCase.path(refusals)} — PRD §8 "${testCase.row}"`,
+          );
+        }
+      }
     }
+
+    // Collect rather than fail fast: one run should report every broken cell,
+    // not just the first.
+    expect(failures, `\n${failures.join('\n')}`).toStrictEqual([]);
   });
+
+  it('never answers 403 to a non-member — a 403 would confirm the trip exists', async () => {
+    const failures: string[] = [];
+
+    for (const testCase of CASES) {
+      const response = await send(refusals.outsiderToken, testCase, refusals);
+      if (response.status !== 404) {
+        failures.push(
+          `${testCase.method.toUpperCase()} ${testCase.path(refusals)} answered ` +
+            `${response.status} to a non-member (want 404)`,
+        );
+      }
+    }
+
+    expect(failures, `\n${failures.join('\n')}`).toStrictEqual([]);
+  });
+
+  /**
+   * One world per role rather than per case.
+   *
+   * These requests really do mutate, but the assertion is only "not 403", and
+   * a later case seeing 404 because an earlier one deleted its subject still
+   * proves what this test is for: the role got past the authorization gate.
+   */
+  /**
+   * Three actions change the trip as a whole and cannot share a world with
+   * anything: archiving makes it read-only, transferring ownership demotes the
+   * caller, and deleting it takes the trip away. No ordering rescues them —
+   * archive refuses the other two, and transfer refuses delete — so each gets
+   * a fixture of its own. Everything else shares one.
+   */
+  const NEEDS_OWN_WORLD = new Set(['Archive', 'Transfer ownership', 'Delete trip']);
+
+  for (const role of ALL) {
+    const allowed = CASES.filter((testCase) => testCase.allowed.includes(role));
+
+    it(`admits a ${role} to all ${allowed.length} actions PRD §8 grants them`, async () => {
+      const world = await buildWorld();
+      const failures: string[] = [];
+
+      for (const testCase of allowed) {
+        const target = NEEDS_OWN_WORLD.has(testCase.row) ? await buildWorld() : world;
+        const response = await send(target.tokens[role], testCase, target);
+        if (response.status === 403) {
+          failures.push(
+            `${testCase.method.toUpperCase()} ${testCase.path(target)} — PRD §8 "${testCase.row}"`,
+          );
+        }
+      }
+
+      expect(failures, `${role} was refused:\n${failures.join('\n')}`).toStrictEqual([]);
+    });
+  }
 
   it('refuses every mutation on an archived trip, whatever the role', async () => {
     const world = await buildWorld();
@@ -767,5 +824,79 @@ describe('restore routes are scoped to the trip in the URL', () => {
       body.items,
       'the other trip’s expense was resurrected by a stranger',
     ).toHaveLength(0);
+  });
+});
+
+describe('idempotency stores the response before answering (§8.8)', () => {
+  /**
+   * The retry must never be told "still processing".
+   *
+   * Storing the response fire-and-forget left a window where the key was
+   * claimed but its `statusCode` was still NULL, so a retry arriving inside it
+   * took the in-flight branch and got 409. That is precisely backwards: a
+   * client whose connection is flaky enough to retry is *most* likely to
+   * retry inside that window, and idempotency exists so that retry is safe.
+   */
+  const payload = { destination: 'Kyoto', startDate: '2026-05-18', endDate: '2026-05-20' };
+
+  it('replays immediately, with no gap between responding and storing', async () => {
+    const user = await createUser();
+
+    // No delay at all between the two: any window is a failing window.
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const key = `retry-${attempt}-${user.id}`;
+
+      const first = await authed(user.token)
+        .post('/v1/trips')
+        .set('Idempotency-Key', key)
+        .send(payload)
+        .expect(201);
+
+      const second = await authed(user.token)
+        .post('/v1/trips')
+        .set('Idempotency-Key', key)
+        .send(payload)
+        .expect(201);
+
+      expect(second.body.id).toBe(first.body.id);
+      expect(second.headers['idempotent-replay']).toBe('true');
+    }
+  });
+
+  it('replays a 204 too, not just a body-bearing response', async () => {
+    const world = await buildWorld();
+    const key = `archive-${world.tripId}`;
+
+    await authed(world.tokens.OWNER)
+      .post(`/v1/trips/${world.tripId}/archive`)
+      .set('Idempotency-Key', key)
+      .expect(204);
+
+    // A 204 never calls res.json, so it used to be finalised on 'finish' —
+    // which fires *after* the response has already gone out.
+    const replay = await authed(world.tokens.OWNER)
+      .post(`/v1/trips/${world.tripId}/archive`)
+      .set('Idempotency-Key', key);
+
+    expect(replay.status).not.toBe(409);
+  });
+
+  it('lets exactly one of two genuinely concurrent requests through', async () => {
+    const user = await createUser();
+    const key = `concurrent-${user.id}`;
+
+    const [a, b] = await Promise.all([
+      authed(user.token).post('/v1/trips').set('Idempotency-Key', key).send(payload),
+      authed(user.token).post('/v1/trips').set('Idempotency-Key', key).send(payload),
+    ]);
+
+    const statuses = [a.status, b.status].sort();
+    // One creates. The other either replays it or is told to retry — but
+    // never creates a second trip.
+    expect(statuses[0]).toBe(201);
+    expect([201, 409]).toContain(statuses[1]);
+
+    const { body } = await authed(user.token).get('/v1/trips').expect(200);
+    expect(body.items, 'a duplicate trip was created').toHaveLength(1);
   });
 });

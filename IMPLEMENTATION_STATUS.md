@@ -3,7 +3,7 @@
 Honest accounting of what is built, what is not, and the order to continue in.
 Tracks the phases in `TECHNICAL_DESIGN.md` §17.
 
-**Verified working:** 476 tests (199 unit + 277 API) · `tsc --noEmit` and ESLint
+**Verified working:** 479 tests (199 unit + 280 API) · `tsc --noEmit` and ESLint
 clean · 25 tables migrated · invariant triggers reject bad data · auth guards
 return 401/403/404 correctly · all 99 operations documented in `openapi.json`,
 enforced by a test · **a full user journey — folder → trip → participant →
@@ -12,9 +12,11 @@ expense → balances → settle-up — completes over HTTP with no SQL.**
 **Every module is now implemented.** What remains is deployment, a handful of
 named gaps below, and the test flake.
 
-⚠️ **The suite has a known ~5% flake** (re-measured over 69 runs). See "Known
-shortcuts" below. It is test infrastructure, not product code, but it is not
-fixed and should not be ignored.
+✅ **The long-standing suite flake is fixed.** It was two bugs, and the first
+was in product code — idempotency answered a retry with 409 because it stored
+the response fire-and-forget. The second was the harness opening a fresh TCP
+server per request. 0 failures in 20 runs, from 3-in-15 before. See
+`E2E_TEST_PLAN.md` Phase 0.
 
 📋 **`E2E_TEST_PLAN.md`** tracks the phased end-to-end coverage pass. Phases 0
 and 1 are complete; it also records six requirements that have no route to test
@@ -366,36 +368,25 @@ Every module from here ships with API tests, because the harness exists.
 - **Public suggestions (FR-SHARE-06) are not implemented.** The `allowSuggestions`
   toggle is stored and returned but no public route consumes it. Member
   suggestions work.
-- **Known test flake, ~5% of full-suite runs** (re-measured: 3 failures in 69
-  runs). Always the same shape: a row created moments earlier returns 404, in a
-  different test each time. Never reproduces on a single file — only with
-  several. Ruled out so far, with evidence: worker parallelism (files proven
-  sequential by probe), pool size (unchanged at 20), per-test truncation
-  (removed entirely), leaked pools (`isolate: true` + per-file close),
-  non-atomic factories (now transactional), untracked background writes (now
-  drained), and — added in the E2E test-plan pass — **job workers** (`startJobs`
-  returns early under `isTest`), **idempotency background writes** (unreachable
-  without an `Idempotency-Key` header), **fake-timer bleed across files** (no
-  test installs them), and **responding before commit** (no route responds
-  inside `withTransaction`).
+- ~~Known test flake, ~5% of full-suite runs~~ — **fixed, and it was two bugs.**
 
-  One occurrence is captured in full in `E2E_TEST_PLAN.md` Phase 0:
-  `canvas.test.ts > blocks > soft-deletes and restores`, where `DELETE`
-  404s on a block whose creation asserted 201 moments earlier. It narrows to two
-  candidates — `loadTripAccess` returning null ("Trip not found") or
-  `findBlockInTrip` returning null ("Block not found") — which are unrelated
-  bugs that the suite could not previously distinguish.
+  **In product code:** `idempotency.ts` stored the outgoing response with
+  `background()` and then responded, leaving a window where the key was claimed
+  but its `statusCode` was still NULL. A retry arriving inside it took the
+  "original still in flight" branch and got **409 instead of its replay** — the
+  one answer idempotency must never give, and most likely to hit exactly the
+  flaky-connection client the feature exists for. The write is now awaited
+  before the bytes go out, hooked on `res.end` so the 204 path is covered too.
 
-  **`test/support/api.ts` patches supertest's `_assertStatus`** to report the
-  method, URL, content-type, error code, message, and `requestId` on every
-  status mismatch. That immediately changed the diagnosis: the flaky 404s come
-  back with an **empty body**, and this API's error handler always emits JSON —
-  so the response never came from the application. Both database-side candidates
-  are retired; the remaining avenue is the HTTP layer between supertest and the
-  21 per-file Express instances. See `E2E_TEST_PLAN.md` Phase 0.
-- Variant comparison (FR-VAR-05) is not implemented — forking works, but the
-  side-by-side diff does not exist.
-- API tests cover the ledger only. Every module built from here adds its own.
-- No system/E2E tests — deferred until the frontend exists, by decision.
-  See `DEVELOPMENT_FLOW.md` §1 for why that is a different layer from the API
-  tests above.
+  **In the harness:** `test/support/api.ts` passed a bare Express app to
+  supertest, whose `serverAddress` does `if (!addr) this._server = app.listen(0)`
+  and closes it again in `end()` — so **every request bound and released an
+  ephemeral port**, thousands of cycles per run. That produced 404s with no
+  content-type and no body, which no Express handler can emit. Now one listening
+  server is bound per test file.
+
+  The recorded diagnosis ("test infrastructure, not product code"; "a row created
+  moments earlier returns 404") was wrong on both counts and sent four earlier
+  fix attempts at the database. What broke the deadlock was making the failure
+  legible — printing the body and content-type at the moment of failure — not a
+  better theory. **0 failures in 20 runs, from 3-in-15 before.**

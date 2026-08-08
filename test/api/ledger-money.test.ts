@@ -734,20 +734,29 @@ describe('the ledger at the scale the PRD commits to (FR-SPLIT-47)', () => {
 
     // Amounts that do not divide evenly, so every expense exercises the
     // largest-remainder path rather than the easy case.
-    for (let i = 0; i < 500; i += 1) {
-      const payer = participantIds[i % participantIds.length]!;
-      const sharers = participantIds.slice(0, 3 + (i % 17));
+    // Written in batches of 25. The ceiling being proved is on *reading* 500
+    // expenses back, not on how fast the suite can insert them one at a time —
+    // and serialising the writes was most of this test's wall clock.
+    const BATCH = 25;
+    for (let start = 0; start < 500; start += BATCH) {
+      await Promise.all(
+        Array.from({ length: BATCH }, (_, offset) => {
+          const i = start + offset;
+          const payer = participantIds[i % participantIds.length]!;
+          const sharers = participantIds.slice(0, 3 + (i % 17));
 
-      await authed(ledger.owner.token)
-        .post(`/v1/trips/${ledger.tripId}/expenses`)
-        .send({
-          description: `Expense ${i}`,
-          amountMinor: String(1001 + i * 7),
-          currency: 'INR',
-          payments: [{ participantId: payer, amountMinor: String(1001 + i * 7) }],
-          split: { method: 'EQUAL', participantIds: sharers },
-        })
-        .expect(201);
+          return authed(ledger.owner.token)
+            .post(`/v1/trips/${ledger.tripId}/expenses`)
+            .send({
+              description: `Expense ${i}`,
+              amountMinor: String(1001 + i * 7),
+              currency: 'INR',
+              payments: [{ participantId: payer, amountMinor: String(1001 + i * 7) }],
+              split: { method: 'EQUAL', participantIds: sharers },
+            })
+            .expect(201);
+        }),
+      );
     }
 
     const startedAt = process.hrtime.bigint();

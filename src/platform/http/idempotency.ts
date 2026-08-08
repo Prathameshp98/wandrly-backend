@@ -18,7 +18,6 @@
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import { and, eq, sql } from 'drizzle-orm';
 
-import { background } from '../background';
 import { db } from '../db/index';
 import { idempotencyKeys } from '../db/schema/index';
 import { hashPayload } from '../crypto/index';
@@ -123,10 +122,23 @@ async function replayOrReject(
 }
 
 /**
- * Wrap `res.json` so the outgoing body is persisted against the key.
+ * Persist the outgoing response against the key, BEFORE the bytes go out.
  *
- * Non-2xx responses release the key instead, so a genuine failure can be
- * retried rather than replaying an error forever.
+ * The ordering here is the whole contract. An earlier version stored the
+ * response with `background()` — fire-and-forget — and responded immediately.
+ * That left a window in which the key was claimed but its `statusCode` was
+ * still NULL, and a retry landing inside it took the "original still in
+ * flight" branch and got **409 instead of the replay it asked for**.
+ *
+ * The window is small, so it read as an intermittent test failure rather than
+ * as what it is: on a flaky mobile connection, a client's automatic retry is
+ * *most* likely to arrive exactly then. Idempotency exists so a retry is safe;
+ * answering it with a conflict is the one thing it must never do.
+ *
+ * So the write is awaited. `res.end` is the hook rather than `res.json`
+ * because everything funnels through it — `json` → `send` → `end`, and a 204
+ * calls it directly — which is also why the 204 case no longer needs a
+ * separate `finish` listener that fired *after* the response had already gone.
  */
 function captureResponse(
   req: Request,
@@ -135,45 +147,55 @@ function captureResponse(
   route: string,
 ): void {
   const originalJson = res.json.bind(res);
+  const originalEnd = res.end.bind(res);
 
-  res.json = (body: unknown): Response => {
-    const status = res.statusCode;
+  let body: unknown = null;
+  let hasBody = false;
 
-    background(
-      isReplayable(status)
-        ? db
-            .update(idempotencyKeys)
-            .set({ statusCode: status, response: JSON.stringify(body) })
-            .where(eq(idempotencyKeys.key, scopedKey))
-        : // A non-2xx releases the key, so a genuine failure stays retryable
-          // rather than replaying an error forever.
-          db
-            .delete(idempotencyKeys)
-            .where(
-              and(
-                eq(idempotencyKeys.key, scopedKey),
-                sql`${idempotencyKeys.statusCode} is null`,
-              ),
-            ),
-      `idempotency:${route}`,
-    );
-
-    return originalJson(body);
+  res.json = (value: unknown): Response => {
+    body = value;
+    hasBody = true;
+    return originalJson(value);
   };
 
-  // 204 responses never call res.json, so release the key on finish.
-  // 204 responses never call res.json, so the key is finalised on finish.
-  res.on('finish', () => {
-    if (res.statusCode === 204) {
-      background(
-        db
+  let finalising = false;
+
+  res.end = function patchedEnd(this: Response, ...args: unknown[]): Response {
+    // Express can reach `end` more than once (HEAD, aborted writes). Persist
+    // once; let everything after through untouched.
+    if (finalising) return originalEnd(...(args as Parameters<typeof originalEnd>));
+    finalising = true;
+
+    const status = res.statusCode;
+
+    const write = isReplayable(status)
+      ? db
           .update(idempotencyKeys)
-          .set({ statusCode: 204, response: 'null' })
-          .where(eq(idempotencyKeys.key, scopedKey)),
-        'idempotency:204',
-      );
-    }
-  });
+          .set({ statusCode: status, response: hasBody ? JSON.stringify(body) : 'null' })
+          .where(eq(idempotencyKeys.key, scopedKey))
+      : // A non-2xx releases the key, so a genuine failure stays retryable
+        // rather than replaying an error forever.
+        db
+          .delete(idempotencyKeys)
+          .where(
+            and(
+              eq(idempotencyKeys.key, scopedKey),
+              sql`${idempotencyKeys.statusCode} is null`,
+            ),
+          );
+
+    void Promise.resolve(write)
+      .catch((error: unknown) => {
+        // Never fail the request over its own bookkeeping — the mutation has
+        // already happened and the client is entitled to hear about it.
+        log.error({ err: error, route }, 'failed to persist idempotent response');
+      })
+      .finally(() => {
+        originalEnd(...(args as Parameters<typeof originalEnd>));
+      });
+
+    return res;
+  } as typeof res.end;
 
   void req;
 }

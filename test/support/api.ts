@@ -75,7 +75,33 @@ if (!(PATCHED in prototype)) {
 
 const app = buildApp();
 
-export const api = supertest(app);
+/**
+ * Bind ONE listening server per test file, rather than one per request.
+ *
+ * supertest's `serverAddress` does `if (!addr) this._server = app.listen(0)`
+ * and its `end` closes that server again — so handing it a bare Express app
+ * opens and closes a fresh ephemeral port **for every single request**. Across
+ * this suite that is several thousand bind/close cycles per run.
+ *
+ * That churn is the best remaining explanation for the suite's long-standing
+ * intermittent 404: the failures come back with **no content-type and no
+ * body**, and this app's error handler always emits JSON, so the response
+ * never came from Express. A request landing on a just-recycled ephemeral port
+ * — or written to a pooled keep-alive socket whose server has since closed —
+ * produces exactly that.
+ *
+ * Passing an already-listening server makes `app.address()` non-null, so
+ * supertest never sets `_server` and never opens or closes anything per
+ * request. `unref()` keeps the handle from holding the process open once the
+ * file's tests are done.
+ *
+ * `listen()` binds its handle synchronously, so `address()` is valid on the
+ * next line even though `listening` has not been emitted yet.
+ */
+const server = app.listen(0);
+server.unref();
+
+export const api = supertest(server);
 
 /** `authed(token).get('/v1/…')` — saves repeating the header everywhere. */
 export function authed(token: string) {

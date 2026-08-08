@@ -16,7 +16,7 @@ test today.
 
 | Phase | State | Tests | Bugs found |
 |---|---|---|---|
-| 0 — Suite health | ✅ | — | flake re-measured (~5%), diagnosis fixed |
+| 0 — Suite health | ✅ | +3 | **2** — the flake, root-caused and fixed |
 | 1 — Permission matrix | ✅ | +49 | **5** (2 cross-trip security holes) |
 | 2 — Money & ledger | ✅ | +18 | **4** (settle-up lost money) |
 | 3 — Canvas, variants, limits | ⏳ | | |
@@ -26,8 +26,10 @@ test today.
 | 7 — Cross-cutting | ⏳ | | |
 | 8 — The nine journeys | ⏳ | | |
 
-**409 → 476 tests. 9 real bugs found and fixed.** Two of them let a caller
-touch another trip's data; one silently lost money from the ledger.
+**409 → 479 tests. 11 real bugs found and fixed.** Two let a caller touch
+another trip's data, one silently lost money from the ledger, one broke the
+idempotency guarantee — and the long-standing suite flake is root-caused and
+gone (20/20 clean, from 3-in-15 immediately before).
 
 ---
 
@@ -172,7 +174,68 @@ reproduction attempts — trades certain progress for uncertain progress.
 **Standing instruction:** if any phase below sees an unexplained 404, capture
 the full assertion output before re-running.
 
-#### Update after Phase 2 — the diagnostic paid off, and the diagnosis changed
+#### Resolved — root cause found, two bugs fixed
+
+**The flake was two bugs, and the first one was in product code.**
+
+**Bug 1 — idempotency answered a retry with 409.** `captureResponse` stored the
+outgoing response with `background()` — fire-and-forget — and then responded.
+That left a window in which the key was claimed but its `statusCode` was still
+NULL, so a retry arriving inside it took the "original still in flight" branch
+and got **409 instead of the replay it asked for**.
+
+This was never test infrastructure, and the window is worst exactly where it
+matters: a client whose connection is flaky enough to retry is *most* likely to
+retry inside it. Idempotency exists so a retry is safe; answering it with a
+conflict is the one thing it must never do. The write is now awaited before the
+bytes go out, hooked on `res.end` (everything funnels through it — `json` →
+`send` → `end`, and a 204 calls it directly), which also removed the separate
+`finish` listener that fired *after* the 204 had already gone out.
+
+**Bug 2 — the test harness opened a fresh TCP server per request.** This is the
+one that produced the mystery 404s. `test/support/api.ts` passed a bare Express
+app to supertest, and supertest's `serverAddress` does:
+
+```js
+if (!addr) this._server = app.listen(0);   // …and `end()` closes it again
+```
+
+So **every single request bound and released an ephemeral port** — several
+thousand bind/close cycles per run. A request landing on a just-recycled port,
+or written to a pooled keep-alive socket whose server had since closed, returns
+a 404 that never touched Express — which is exactly the signature the
+diagnostic finally showed:
+
+```
+POST /v1/trips
+content-type: <none>
+body: <empty body>
+```
+
+`content-type: <none>` is the tell. Express's `res.json()` always sets one, and
+this app's error handler always ends in `res.status(...).json(payload)`. A
+missing row would have produced `{"error":{"code":"NOT_FOUND",…}}`. No headers
+and no body means no Express.
+
+Fixed by binding **one listening server per test file** and handing supertest
+that, so `app.address()` is never null, `_server` is never set, and nothing is
+opened or closed per request.
+
+**Measured, not assumed:** 3 failures in 15 runs immediately before the fix →
+**0 in 20 after**, on otherwise identical code. Twenty clean runs is strong
+evidence rather than proof — but it is paired with a mechanism that explains the
+exact signature, which the two database-side theories never could.
+
+**What this says about the original record.** `IMPLEMENTATION_STATUS` described
+the flake as "test infrastructure, not product code" and as "a row created
+moments earlier returns 404". Both were wrong, and both misdirected four earlier
+fix attempts toward the database — pool size, truncation, leaked pools, atomic
+factories. It was never a database bug. The thing that broke the deadlock was
+not a better theory but **making the failure legible**: printing the response
+body and content-type at the moment of failure turned a six-attempt mystery into
+two obvious bugs.
+
+#### Earlier update after Phase 2 — the diagnostic paid off, and the diagnosis changed
 
 The flake was caught twice more with the patched assertion in place, and it is
 **not** what the record says it is:
