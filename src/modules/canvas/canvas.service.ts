@@ -18,7 +18,7 @@ import { and, asc, eq, gt, isNull, sql } from 'drizzle-orm';
 import { limits } from '../../platform/config/env';
 import { newId, decryptRecord, encryptRecord } from '../../platform/crypto/index';
 import { db, withTransaction, type Executor } from '../../platform/db/index';
-import { blocks, days, trips, variants } from '../../platform/db/schema/index';
+import { blocks, days, expenses, trips, variants } from '../../platform/db/schema/index';
 import {
   DomainRuleError,
   LimitExceededError,
@@ -558,7 +558,19 @@ export class CanvasService {
 
     assert(access, 'block:edit-any', { createdBy: block.createdBy });
 
-    await db.update(blocks).set({ deletedAt: new Date() }).where(eq(blocks.id, blockId));
+    await withTransaction(async (tx) => {
+      await tx.update(blocks).set({ deletedAt: new Date() }).where(eq(blocks.id, blockId));
+
+      // FR-SPLIT-09 — an expense is a financial record and survives an
+      // itinerary edit, but it must stop claiming a link to a block that is no
+      // longer there, or the planned-vs-actual row renders against nothing.
+      // The FK is ON DELETE SET NULL and blocks are soft-deleted, so it never
+      // fires; the unlink has to be explicit.
+      await tx
+        .update(expenses)
+        .set({ blockId: null })
+        .where(eq(expenses.blockId, blockId));
+    });
 
     const broadcast = new DeferredBroadcast();
     broadcast.queue({

@@ -26,6 +26,7 @@ import {
 import { FxService } from '../../platform/fx/fx.service';
 import { DeferredBroadcast } from '../../platform/realtime/hub';
 import {
+  allocate,
   convertMinor,
   formatMinor,
   isFullySettled,
@@ -243,6 +244,14 @@ export class LedgerService {
         currency: input.currency,
         validParticipantIds: participantIds,
       });
+
+      // FR-SPLIT-09 — a block link may only target this trip's MAIN variant,
+      // since actual money is spent against the plan that actually happened.
+      // Without this the link was accepted unchecked, so an expense could point
+      // at a block in somebody else's trip entirely.
+      if (input.blockId) {
+        await this.requireMainVariantBlock(tx, access.tripId, input.blockId);
+      }
 
       const expense = await this.deps.expenses.create(
         tx,
@@ -686,31 +695,149 @@ export class LedgerService {
   }
 
   /** Raw pairwise obligations, for when simplification is off (FR-SPLIT-26). */
+  /**
+   * Assert a block link points at a block on this trip's main variant.
+   *
+   * Raw SQL rather than the canvas repository: the ledger owns the rule that a
+   * link is only valid against the plan that happened, and reaching into
+   * another module's repository to enforce its own invariant would invert the
+   * dependency this service is built around.
+   */
+  private async requireMainVariantBlock(
+    exec: Executor,
+    tripId: string,
+    blockId: string,
+  ): Promise<void> {
+    const result = await exec.execute<{ ok: boolean }>(sql`
+      select true as ok
+        from blocks b
+        join days d      on d.id = b.day_id
+        join variants v  on v.id = d.variant_id
+        join trips t     on t.id = v.trip_id
+       where b.id = ${blockId}
+         and v.trip_id = ${tripId}
+         and v.id = t.main_variant_id
+         and b.deleted_at is null
+       limit 1
+    `);
+
+    if ((result.rows ?? []).length === 0) throw new NotFoundError('Block');
+  }
+
+  /**
+   * Who owes whom, expense by expense, before netting.
+   *
+   * This used to be one SQL aggregate that apportioned each payer's slice with
+   * `share * payment / total` in **bigint arithmetic, which truncates**. Two
+   * things went wrong with that, and only the first was recorded:
+   *
+   *   1. Truncation loses the remainder outright, so the transfers no longer
+   *      summed to the balances they were meant to clear. A three-way split of
+   *      10000 paid 5000/5000 left a participant one minor unit short.
+   *   2. Less obviously, apportioning each sharer independently is not enough
+   *      even with exact rounding. For the transfers to clear every balance,
+   *      the matrix needs BOTH exact row sums (each sharer owes exactly their
+   *      share) AND exact column sums (each payer is owed exactly what they
+   *      paid). Rounding rows in isolation satisfies only the first.
+   *
+   * So allocate against each payer's *remaining unallocated* amount rather
+   * than their original payment. Because the shares and the payments of one
+   * expense both sum to its total, the last sharer consumes exactly what is
+   * left and both dimensions come out exact by construction.
+   */
   private async pairwiseDebts(
     tripId: string,
   ): Promise<{ from: string; to: string; amount: bigint }[]> {
-    const result = await db.execute<{ from_id: string; to_id: string; amount: string }>(sql`
-      select es.participant_id as from_id,
-             ep.participant_id as to_id,
-             sum(
-               es.share_amount_base_minor
-               * ep.amount_base_minor
-               / nullif(e.amount_base_minor, 0)
-             )::bigint::text as amount
+    const result = await db.execute<{
+      expense_id: string;
+      participant_id: string;
+      share_minor: string | null;
+      payment_minor: string | null;
+    }>(sql`
+      select e.id as expense_id,
+             p.participant_id,
+             p.share_minor::text,
+             p.payment_minor::text
         from expenses e
-        join expense_shares es   on es.expense_id = e.id
-        join expense_payments ep on ep.expense_id = e.id
+        join lateral (
+          select es.participant_id,
+                 es.share_amount_base_minor as share_minor,
+                 null::bigint as payment_minor
+            from expense_shares es
+           where es.expense_id = e.id
+           union all
+          select ep.participant_id,
+                 null::bigint as share_minor,
+                 ep.amount_base_minor as payment_minor
+            from expense_payments ep
+           where ep.expense_id = e.id
+        ) p on true
        where e.trip_id = ${tripId}
          and e.deleted_at is null
-         and es.participant_id <> ep.participant_id
-       group by es.participant_id, ep.participant_id
     `);
 
-    return (result.rows ?? []).map((row) => ({
-      from: row.from_id,
-      to: row.to_id,
-      amount: BigInt(row.amount ?? '0'),
-    }));
+    interface Leg {
+      shares: { id: string; amount: bigint }[];
+      payments: { id: string; amount: bigint }[];
+    }
+
+    const byExpense = new Map<string, Leg>();
+    for (const row of result.rows ?? []) {
+      const leg = byExpense.get(row.expense_id) ?? { shares: [], payments: [] };
+      if (row.share_minor !== null) {
+        leg.shares.push({ id: row.participant_id, amount: BigInt(row.share_minor) });
+      }
+      if (row.payment_minor !== null) {
+        leg.payments.push({ id: row.participant_id, amount: BigInt(row.payment_minor) });
+      }
+      byExpense.set(row.expense_id, leg);
+    }
+
+    const debts = new Map<string, bigint>();
+    const owe = (from: string, to: string, amount: bigint): void => {
+      if (from === to || amount === 0n) return;
+      const key = `${from}\u0000${to}`;
+      debts.set(key, (debts.get(key) ?? 0n) + amount);
+    };
+
+    for (const leg of byExpense.values()) {
+      // A refund is negative throughout. Work in magnitudes and restore the
+      // sign at the end, since `allocate` requires non-negative weights.
+      const total = leg.payments.reduce((sum, payment) => sum + payment.amount, 0n);
+      const sign = total < 0n ? -1n : 1n;
+
+      const remaining = new Map<string, bigint>(
+        leg.payments.map((payment) => [payment.id, payment.amount * sign]),
+      );
+
+      // Stable order, so the same ledger always produces the same transfers.
+      const shares = [...leg.shares].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+
+      for (const share of shares) {
+        const magnitude = share.amount * sign;
+        if (magnitude === 0n) continue;
+
+        const weights = [...remaining]
+          .filter(([, left]) => left > 0n)
+          .map(([id, left]) => ({ id, weight: left }));
+
+        // Mixed-sign payments within one expense leave nothing to draw from.
+        // Skip rather than throw: a malformed expense must not break settle-up
+        // for the whole trip.
+        if (weights.length === 0) continue;
+
+        const portion = allocate(magnitude, weights);
+        for (const [payerId, amount] of portion) {
+          remaining.set(payerId, (remaining.get(payerId) ?? 0n) - amount);
+          owe(share.id, payerId, amount * sign);
+        }
+      }
+    }
+
+    return [...debts].map(([key, amount]) => {
+      const [from, to] = key.split('\u0000');
+      return { from: from!, to: to!, amount };
+    });
   }
 
   private buildUpiLink(

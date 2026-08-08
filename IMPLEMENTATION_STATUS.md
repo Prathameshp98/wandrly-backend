@@ -3,7 +3,7 @@
 Honest accounting of what is built, what is not, and the order to continue in.
 Tracks the phases in `TECHNICAL_DESIGN.md` §17.
 
-**Verified working:** 458 tests (199 unit + 259 API) · `tsc --noEmit` and ESLint
+**Verified working:** 476 tests (199 unit + 277 API) · `tsc --noEmit` and ESLint
 clean · 25 tables migrated · invariant triggers reject bad data · auth guards
 return 401/403/404 correctly · all 99 operations documented in `openapi.json`,
 enforced by a test · **a full user journey — folder → trip → participant →
@@ -337,10 +337,13 @@ Every module from here ships with API tests, because the harness exists.
 
 ## Known shortcuts to revisit
 
-- `LedgerService.pairwiseDebts` apportions each payer's share of each expense
-  with integer division, so non-simplified mode can drift by a minor unit on
-  multi-payer expenses. Simplified mode (the default) is exact. Fix by allocating
-  pairwise obligations with `allocate()` rather than dividing in SQL.
+- ~~`LedgerService.pairwiseDebts` drifts by a minor unit~~ — **fixed**. The
+  recorded diagnosis (integer division in SQL) was right but incomplete:
+  apportioning each sharer independently cannot clear the balances even with
+  exact rounding, because the debt matrix needs exact row sums *and* exact
+  column sums. Now allocates against each payer's remaining unallocated amount,
+  so both come out exact by construction. A test applies every proposed transfer
+  and requires everyone to land on exactly zero.
 - `ExpenseRepository.updateFields` and `replaceSplit` exist but no `PATCH
   /expenses/:id` route is wired yet, so expense editing (`FR-SPLIT-41`) is not
   reachable. The audit-on-edit requirement is written but untested.
@@ -353,6 +356,13 @@ Every module from here ships with API tests, because the harness exists.
 - ~~`CanvasService.deleteBlock` never flushed its broadcast~~ — **fixed**.
 - ~~Comments are member-only~~ — **fixed**: guest commenting via a share link
   works, with a guest token scoping edit/delete rights.
+- **`openapi.json` documents 21 of 99 2xx response bodies as an empty `{}`
+  schema** — the whole expense read path, the dashboard, media, and all four
+  exports. Route coverage is enforced by a test; response-shape coverage is not.
+  With the frontend undecided this is the declared contract, so a generated
+  client gets `any` for a fifth of the API. See `E2E_TEST_PLAN.md` Phase 2.
+- **FR-SPLIT-09 is now two-thirds implemented.** A linked expense survives its
+  block's deletion and unlinks cleanly; the owner is still not notified.
 - **Public suggestions (FR-SHARE-06) are not implemented.** The `allowSuggestions`
   toggle is stored and returned but no public route consumes it. Member
   suggestions work.

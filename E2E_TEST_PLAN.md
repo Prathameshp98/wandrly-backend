@@ -248,7 +248,80 @@ same as asserting every *route* consults it. A route that forgets
 
 ---
 
-### Phase 2 — Money and the ledger
+### Phase 2 — Money and the ledger ✅
+
+**18 tests added** (`ledger-money.test.ts`). Suite: 458 → 476. **Four real bugs
+found, all fixed.**
+
+1. **Pairwise settle-up lost money — and the recorded diagnosis was only half
+   of it.** `IMPLEMENTATION_STATUS` blamed integer division in SQL, which was
+   right but incomplete. Truncation was one cause; the deeper one is that
+   apportioning each sharer's debt independently cannot work *even with exact
+   rounding*. For the transfers to clear every balance, the debt matrix needs
+   exact **row** sums (each sharer owes exactly their share) **and** exact
+   **column** sums (each payer is owed exactly what they paid). Rounding rows in
+   isolation gives only the first.
+
+   Fixed by allocating against each payer's *remaining unallocated* amount
+   rather than their original payment: because an expense's shares and payments
+   both sum to its total, the last sharer consumes exactly what is left and both
+   dimensions come out exact by construction. Refunds are handled by working in
+   magnitudes and restoring the sign, since `allocate` requires non-negative
+   weights.
+
+   The test applies every proposed transfer to the balances and requires
+   everyone to land on exactly zero — which is the property users actually care
+   about, and which the previous shape failed by one minor unit.
+
+2. **An expense could be linked to a block in another trip.** `createExpense`
+   wrote `blockId: input.blockId ?? null` with no validation at all. FR-SPLIT-09
+   requires links to target *this* trip's *main* variant; both halves are now
+   enforced, and a foreign or non-main block id returns 404.
+
+3. **FR-SPLIT-09's "becomes unlinked" half was unimplemented.** Deleting a block
+   left every linked expense still pointing at it. The FK is `ON DELETE SET
+   NULL`, but blocks are *soft*-deleted so it never fires — the unlink has to be
+   explicit, and was not. Expenses now unlink inside the same transaction as the
+   block's deletion. (The requirement's third clause, notifying the owner, is
+   still not implemented — recorded below.)
+
+4. Carried over from Phase 1's pattern: `deleteExpense` and `restoreExpense`
+   gained their author checks here too, completing the "own only" cell.
+
+**Verified rather than assumed:**
+
+- **FR-SPLIT-47 is met with room to spare.** 500 expenses × 20 participants:
+  balances in **6–13 ms**, settle-up in **8–14 ms**, against a 2000 ms ceiling.
+  Simplification stayed within n−1 transfers and cleared every balance exactly.
+- Zero-decimal (JPY) and three-decimal (BHD) currencies both round at the right
+  digit and sum exactly.
+- The exponent shift is right: ¥10,000 into an INR ledger is 580000 paise —
+  not 5800, and not 58000000.
+- A frozen rate really is frozen: moving JPY→INR 20% after the fact leaves
+  recorded balances untouched.
+- Largest-remainder is stable across repeated identical splits.
+- A full-value refund returns every participant to their exact prior balance.
+
+**Found and recorded, not fixed — a documentation gap worth its own pass:**
+**21 of 99 operations declare their 2xx response body as an empty `{}` schema**,
+including the whole expense read path (`GET /expenses`, `POST /expenses`,
+`GET /me/balances`, both settlement transitions), the dashboard, media, and all
+four exports. `openapi-coverage.test.ts` proves every *route* is documented;
+nothing proves its *response shape* is. With the frontend undecided and
+`openapi.json` declared as the contract (TECHNICAL_DESIGN §22), a generated
+client currently gets `any` for a fifth of the API. Some are legitimately
+non-JSON (`.txt`, `.ics`, `.pdf`, `.csv`, media bytes) and want a corrected
+content type rather than a schema; the rest have DTOs already defined and simply
+unreferenced.
+
+Also noted: `POST /expenses` answers with `{ id }` alone, so a client must
+immediately re-read to see the shares, the frozen rate, and the base-currency
+amount it just caused to be computed. Every other create route returns its full
+DTO. Left alone as an API-shape decision rather than a bug.
+
+---
+
+### Phase 2 — original scope
 
 The property tests in `src/money/` are excellent and cover the *algorithms*.
 This phase covers the *ledger over HTTP*, which is where the algorithms meet
