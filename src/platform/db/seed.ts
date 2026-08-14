@@ -30,7 +30,7 @@ import {
 import { newId } from '../crypto/index';
 import { allocateBoth, convertMinor, parseRate } from '../../money/index';
 import { logger } from '../logging/logger';
-import { isProduction } from '../config/env';
+import { env, isProduction } from '../config/env';
 
 const JPY_TO_INR = '0.58000000';
 
@@ -99,10 +99,57 @@ const KYOTO_EXPENSES = [
   { description: 'Konbini supplies', amountMinor: 3_340n, category: 'GROCERIES', payer: 1 },
 ] as const;
 
-async function seed(): Promise<void> {
+/**
+ * Hosts this script is willing to truncate.
+ *
+ * `postgres` is the service name in docker-compose; `host.docker.internal`
+ * reaches the host from inside a container.
+ */
+const LOCAL_HOSTS = new Set([
+  'localhost',
+  '127.0.0.1',
+  '::1',
+  'host.docker.internal',
+  'postgres',
+]);
+
+/**
+ * Refuse to run anywhere but a local database.
+ *
+ * `NODE_ENV` is a claim about intent; `DATABASE_URL` is the fact about where
+ * the writes land. Guarding on the claim alone leaves a real hole: a local
+ * `.env` saying `NODE_ENV=development` while `DATABASE_URL` points at the
+ * production pooler passes the check and then truncates eighteen tables in
+ * production. That exact configuration existed in this repo.
+ *
+ * So the target is verified as well as the label. Deliberate work against a
+ * remote database goes through `db:migrate` with an explicit
+ * `DATABASE_URL="$PROD_DATABASE_URL"`, which is a different command that does
+ * not destroy anything.
+ */
+function assertLocalDatabase(): void {
   if (isProduction) {
     throw new Error('Refusing to seed a production database');
   }
+
+  let hostname: string;
+  try {
+    ({ hostname } = new URL(env.DATABASE_URL));
+  } catch {
+    throw new Error('Refusing to seed: DATABASE_URL is not a parseable URL');
+  }
+
+  if (!LOCAL_HOSTS.has(hostname)) {
+    throw new Error(
+      `Refusing to seed a non-local database (host: ${hostname}).\n` +
+        'Seeding truncates every table. Point DATABASE_URL at a local database — ' +
+        'see .env.example — and keep the production URL in PROD_DATABASE_URL.',
+    );
+  }
+}
+
+async function seed(): Promise<void> {
+  assertLocalDatabase();
 
   logger.info('seeding development data');
 
