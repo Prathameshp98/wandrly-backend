@@ -1,12 +1,14 @@
 /**
- * Development seed — the prototype's Kyoto dataset.
+ * Development seed — the prototype's dataset, per PRD §15.3.
  *
  * TECHNICAL_DESIGN §13.2: "The seed script must load the prototype's actual
  * dataset. It is unusually good test data."
  *
- * Notably it is **entirely JPY**, a zero-decimal currency, so the rounding edge
- * cases that break naive money code are exercised from the first day of
- * development rather than discovered in production.
+ * The fixture itself lives in `seed.data.ts`; this file is the insert logic.
+ *
+ * Notably the ledger is **entirely JPY**, a zero-decimal currency, so the
+ * rounding edge cases that break naive money code are exercised from the first
+ * day of development rather than discovered in production.
  *
  * Idempotent: truncates and reseeds.
  */
@@ -31,73 +33,18 @@ import { newId } from '../crypto/index';
 import { allocateBoth, convertMinor, parseRate } from '../../money/index';
 import { logger } from '../logging/logger';
 import { env, isProduction } from '../config/env';
+import {
+  FOLDERS,
+  ID,
+  KYOTO_DAYS,
+  KYOTO_EXPENSES,
+  KYOTO_VARIANTS,
+  TOKYO_DAYS,
+  TRIPS,
+  USERS,
+} from './seed.data';
 
 const JPY_TO_INR = '0.58000000';
-
-/** Stable ids so re-seeding produces the same URLs. */
-const ID = {
-  arjun: '00000000-0000-7000-8000-00000000a001',
-  priya: '00000000-0000-7000-8000-00000000a002',
-  sana: '00000000-0000-7000-8000-00000000a003',
-  japanFolder: '00000000-0000-7000-8000-00000000b001',
-  kyoto: '00000000-0000-7000-8000-00000000c001',
-  tokyo: '00000000-0000-7000-8000-00000000c002',
-} as const;
-
-const KYOTO_DAYS = [
-  {
-    number: 1,
-    date: '2026-05-18',
-    title: 'Arrival & wandering',
-    note: 'Long travel day — take it easy. Jet-lag is real.',
-    blocks: [
-      ['TRANSPORT', 'Mumbai → Kansai', '02:45 → 13:20', 'Air India · AI 045 · Direct', true],
-      ['TRANSPORT', 'Kansai → Kyoto Station', '14:30 → 15:45', 'JR Haruka Limited Express', true],
-      ['ACCOMMODATION', 'Yoshida-sanso Ryokan', 'Check-in 16:00', '3 nights · Tatami Suite', true],
-      ['RESTAURANT', 'Issen Yōshoku', '19:30', 'Okonomiyaki · ¥¥ · Gion', false],
-      ['NOTE', 'Onsen at 22:00', '', "Ryokan's bath closes at 23:00", false],
-    ],
-  },
-  {
-    number: 2,
-    date: '2026-05-19',
-    title: 'Higashiyama temples',
-    note: 'Early start — gates open at 6:00, beat the school groups.',
-    blocks: [
-      ['ACTIVITY', 'Kiyomizu-dera', '06:00 → 08:30', '¥400 entry · 1.2 km walk', true],
-      ['ACTIVITY', 'Sannenzaka & Ninenzaka', '09:00 → 11:00', 'Preserved historic streets', false],
-      ['MAP_PIN', 'Yasaka Pagoda', '', '34.9988° N, 135.7799° E', false],
-      ['RESTAURANT', 'Yagenbori', '12:30', 'Obanzai · ¥¥¥ · Pontocho Alley', true],
-      ['PHOTO', '4 photos · Higashiyama', '', 'Reference shots from last visit', false],
-      ['RESTAURANT', 'Kikunoi', '18:30', 'Kaiseki · ¥¥¥¥¥ · 3 stars', true],
-    ],
-  },
-  {
-    number: 3,
-    date: '2026-05-20',
-    title: 'Bamboo grove & Arashiyama',
-    note: '',
-    blocks: [
-      ['TRANSPORT', 'Kyoto → Saga-Arashiyama', '08:00 → 08:18', 'JR Sagano Line · ¥240', true],
-      ['ACTIVITY', 'Arashiyama Bamboo Grove', '09:00 → 10:00', 'Free · Best before 10am', true],
-      ['ACTIVITY', 'Tenryū-ji Temple', '10:30 → 12:00', '¥500 garden + ¥300 temple', true],
-      ['RESTAURANT', 'Shōraian', '12:30', 'Yudōfu · ¥¥¥ · Riverside', false],
-      ['TICKET', 'Iwatayama Monkey Park', '14:00 → 16:00', '¥600 · 20 min uphill', true],
-      ['LINK', 'Arashiyama walking guide', '', 'japan-guide.com', false],
-      ['BUDGET', 'Day 3 cash allowance', '', '¥15,000 for the group', false],
-      ['VIDEO', 'Bamboo grove at dawn', '', 'Walking tour reference', false],
-    ],
-  },
-] as const;
-
-/** Expenses that exercise the ledger, all in JPY against an INR base. */
-const KYOTO_EXPENSES = [
-  { description: 'Yoshida-sanso · 3 nights', amountMinor: 86_400n, category: 'ACCOMMODATION', payer: 0 },
-  { description: 'Kikunoi kaiseki', amountMinor: 152_000n, category: 'FOOD', payer: 1 },
-  { description: 'JR Haruka × 3', amountMinor: 10_920n, category: 'TRANSPORT', payer: 0 },
-  { description: 'Monkey park tickets', amountMinor: 1_800n, category: 'ACTIVITY', payer: 2 },
-  { description: 'Konbini supplies', amountMinor: 3_340n, category: 'GROCERIES', payer: 1 },
-] as const;
 
 /**
  * Hosts this script is willing to truncate.
@@ -105,13 +52,7 @@ const KYOTO_EXPENSES = [
  * `postgres` is the service name in docker-compose; `host.docker.internal`
  * reaches the host from inside a container.
  */
-const LOCAL_HOSTS = new Set([
-  'localhost',
-  '127.0.0.1',
-  '::1',
-  'host.docker.internal',
-  'postgres',
-]);
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1', 'host.docker.internal', 'postgres']);
 
 /**
  * Refuse to run anywhere but a local database.
@@ -148,10 +89,58 @@ function assertLocalDatabase(): void {
   }
 }
 
+/**
+ * Optionally hand the whole fixture to a real Supabase account.
+ *
+ * The backend mirrors each Supabase user into its own `users` table on first
+ * sight, so signing in for real otherwise lands on an empty dashboard — the
+ * fixture belongs to the seeded Arjun, not to you. Set `SEED_OWNER_ID` to your
+ * Supabase user id (Dashboard → Authentication → Users) and Arjun's row takes
+ * that id instead, so every trip, membership and expense follows.
+ */
+function resolveOwnerId(): { ownerId: string; claimed: boolean } {
+  const override = process.env.SEED_OWNER_ID?.trim();
+  if (!override) return { ownerId: ID.arjun, claimed: false };
+
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(override)) {
+    throw new Error(`SEED_OWNER_ID is not a UUID: ${override}`);
+  }
+  return { ownerId: override, claimed: true };
+}
+
+/**
+ * Every date from `startDate` to `endDate`, inclusive.
+ *
+ * Walks the calendar rather than dividing a millisecond span: `setUTCDate`
+ * handles month and year ends itself, and there is no rounding to get wrong.
+ * The repo also bans `Math.round` outright — it is a blunt guard against
+ * floating-point money, and worth not chipping away at for a date helper.
+ */
+function datesBetween(startDate: string, endDate: string): string[] {
+  const dates: string[] = [];
+  const cursor = new Date(`${startDate}T00:00:00Z`);
+  const last = new Date(`${endDate}T00:00:00Z`);
+
+  // A single day when the range is inverted or malformed, so a bad fixture
+  // yields one empty day rather than an unbounded loop.
+  if (Number.isNaN(cursor.getTime()) || Number.isNaN(last.getTime()) || last < cursor) {
+    return [startDate];
+  }
+
+  while (cursor <= last) {
+    dates.push(cursor.toISOString().slice(0, 10));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return dates;
+}
+
+type SeedDay = (typeof KYOTO_DAYS)[number];
+
 async function seed(): Promise<void> {
   assertLocalDatabase();
 
-  logger.info('seeding development data');
+  const { ownerId, claimed } = resolveOwnerId();
+  logger.info({ ownerId, claimed }, 'seeding development data');
 
   await db.execute(
     sql.raw(`TRUNCATE TABLE
@@ -163,100 +152,166 @@ async function seed(): Promise<void> {
       RESTART IDENTITY CASCADE`),
   );
 
+  /** Arjun's id, or the real account's when SEED_OWNER_ID is set. */
+  const asOwner = (id: string) => (id === ID.arjun ? ownerId : id);
+
+  let dayTotal = 0;
+  let blockTotal = 0;
+
   await withTransaction(async (tx) => {
     // ── FX ──────────────────────────────────────────────────────────
     await tx.execute(sql`
       INSERT INTO fx_rates (base_currency, quote_currency, rate, as_of) VALUES
-        ('JPY','INR',${JPY_TO_INR},'2026-05-18'),
-        ('USD','INR','83.00000000','2026-05-18'),
-        ('EUR','INR','90.00000000','2026-05-18')
+        ('JPY','INR',${JPY_TO_INR},'2027-05-18'),
+        ('USD','INR','83.00000000','2027-05-18'),
+        ('EUR','INR','90.00000000','2027-05-18')
     `);
 
     // ── People ──────────────────────────────────────────────────────
-    await tx.insert(users).values([
-      { id: ID.arjun, email: 'arjun@wandrly.dev', displayName: 'Arjun Mehta', avatarTone: 'sienna', homeCity: 'New Delhi, India' },
-      { id: ID.priya, email: 'priya@wandrly.dev', displayName: 'Priya Rao', avatarTone: 'teal' },
-      { id: ID.sana, email: 'sana@wandrly.dev', displayName: 'Sana Kapoor', avatarTone: 'gold' },
-    ]);
+    await tx.insert(users).values(
+      USERS.map((user) => ({
+        id: asOwner(user.id),
+        email: user.email,
+        displayName: user.displayName,
+        avatarTone: user.avatarTone,
+        homeCity: user.homeCity,
+      })),
+    );
 
-    await tx.insert(folders).values({
-      id: ID.japanFolder,
-      ownerId: ID.arjun,
-      name: 'Japan 2026',
-      emoji: '🗾',
-      tone: 'gold',
-      isPinned: true,
-    });
+    // ── Folders ─────────────────────────────────────────────────────
+    await tx.insert(folders).values(
+      FOLDERS.map((folder) => ({
+        id: folder.id,
+        ownerId,
+        name: folder.name,
+        emoji: folder.emoji,
+        tone: folder.tone,
+        isPinned: folder.isPinned,
+        sortOrder: folder.sortOrder,
+      })),
+    );
 
-    // ── Kyoto trip ──────────────────────────────────────────────────
-    const kyotoVariantId = newId();
+    // ── Trips ───────────────────────────────────────────────────────
+    const itineraries: Record<string, SeedDay[]> = {
+      [ID.kyoto]: KYOTO_DAYS,
+      [ID.tokyo]: TOKYO_DAYS,
+    };
 
-    await tx.insert(trips).values({
-      id: ID.kyoto,
-      ownerId: ID.arjun,
-      folderId: ID.japanFolder,
-      title: 'Kyoto in Spring',
-      subtitle: 'Cherry blossoms · machiya stays',
-      destination: 'Kyoto, Japan',
-      startDate: '2026-05-18',
-      endDate: '2026-05-24',
-      latitude: '35.011600',
-      longitude: '135.768100',
-      status: 'CONFIRMED',
-      baseCurrency: 'INR',
-      coverHue: 320,
-      coverHue2: 20,
-      mainVariantId: kyotoVariantId,
-    });
+    let kyotoVariantId = '';
 
-    // Three variants — but only the main one carries days, matching the model
-    // where each variant owns its own tree (the prototype faked this).
-    await tx.insert(variants).values([
-      { id: kyotoVariantId, tripId: ID.kyoto, name: 'Slow & cultural', isMain: true, createdBy: ID.arjun },
-      { id: newId(), tripId: ID.kyoto, name: 'Family edit', isMain: false, createdBy: ID.arjun },
-      { id: newId(), tripId: ID.kyoto, name: 'Budget run', isMain: false, createdBy: ID.arjun },
-    ]);
+    for (const [index, trip] of TRIPS.entries()) {
+      const mainVariantId = newId();
+      if (trip.id === ID.kyoto) kyotoVariantId = mainVariantId;
 
-    await tx.insert(tripMembers).values([
-      { tripId: ID.kyoto, userId: ID.arjun, role: 'OWNER' },
-      { tripId: ID.kyoto, userId: ID.priya, role: 'EDITOR' },
-      { tripId: ID.kyoto, userId: ID.sana, role: 'CONTRIBUTOR' },
-    ]);
-
-    for (const day of KYOTO_DAYS) {
-      const dayId = newId();
-      await tx.insert(days).values({
-        id: dayId,
-        variantId: kyotoVariantId,
-        dayNumber: day.number,
-        date: day.date,
-        title: day.title,
-        note: day.note,
-        status: 'CONFIRMED',
+      await tx.insert(trips).values({
+        id: trip.id,
+        ownerId,
+        folderId: trip.folderId,
+        title: trip.title,
+        subtitle: trip.subtitle,
+        destination: trip.destination,
+        startDate: trip.startDate,
+        endDate: trip.endDate,
+        latitude: trip.latitude,
+        longitude: trip.longitude,
+        status: trip.status as never,
+        baseCurrency: 'INR',
+        coverHue: trip.coverHue,
+        coverHue2: trip.coverHue2,
+        isArchived: trip.isArchived,
+        mainVariantId,
       });
 
-      await tx.insert(blocks).values(
-        day.blocks.map(([type, title, timeLabel, meta, confirmed], index) => ({
-          id: newId(),
-          dayId,
-          type: type as never,
-          title,
-          timeLabel,
-          meta,
-          isConfirmed: Boolean(confirmed),
-          sortOrder: index,
-          createdBy: ID.arjun,
+      // Kyoto carries the three FR-VAR variants; the rest have one. Only the
+      // main variant owns days — each variant owns its own tree, which is the
+      // thing the prototype faked by sharing one.
+      const variantNames =
+        trip.id === ID.kyoto ? KYOTO_VARIANTS : ([trip.mainVariantName] as readonly string[]);
+
+      await tx.insert(variants).values(
+        variantNames.map((name, position) => ({
+          id: position === 0 ? mainVariantId : newId(),
+          tripId: trip.id,
+          name,
+          isMain: position === 0,
+          createdBy: ownerId,
         })),
       );
+
+      await tx.insert(tripMembers).values(
+        trip.crew.map(([userId, role]) => ({
+          tripId: trip.id,
+          userId: asOwner(userId),
+          role: role as never,
+        })),
+      );
+
+      // Pinning and ordering are per-user, so they live in trip_user_state
+      // rather than on the trip — one member pinning must not reorder anyone
+      // else's board (PRD §6.2).
+      await tx.execute(sql`
+        INSERT INTO trip_user_state (trip_id, user_id, is_pinned, sort_order)
+        VALUES (${trip.id}, ${ownerId}, ${trip.isPinned}, ${index})
+        ON CONFLICT (trip_id, user_id)
+        DO UPDATE SET is_pinned = excluded.is_pinned, sort_order = excluded.sort_order
+      `);
+
+      // A trip with an itinerary gets its real days; the rest get empty days
+      // spanning their dates, so dayCount is honest and blockCount is 0 —
+      // which is exactly the "No bookings yet" readiness case (FR-DASH-07).
+      const itinerary = itineraries[trip.id];
+      const dayRows: SeedDay[] =
+        itinerary ??
+        datesBetween(trip.startDate, trip.endDate).map((date, offset) => ({
+          number: offset + 1,
+          date,
+          title: '',
+          note: '',
+          status: 'PLANNING' as const,
+          blocks: [],
+        }));
+
+      for (const day of dayRows) {
+        const dayId = newId();
+        await tx.insert(days).values({
+          id: dayId,
+          variantId: mainVariantId,
+          dayNumber: day.number,
+          date: day.date,
+          title: day.title,
+          note: day.note,
+          status: day.status as never,
+        });
+        dayTotal += 1;
+
+        if (day.blocks.length === 0) continue;
+
+        await tx.insert(blocks).values(
+          day.blocks.map((block, position) => ({
+            id: newId(),
+            dayId,
+            type: block.type as never,
+            title: block.title,
+            timeLabel: block.time ?? '',
+            meta: block.meta ?? '',
+            notes: block.notes ?? null,
+            isConfirmed: Boolean(block.confirmed),
+            sortOrder: position,
+            createdBy: ownerId,
+          })),
+        );
+        blockTotal += day.blocks.length;
+      }
     }
 
-    // ── Ledger ──────────────────────────────────────────────────────
+    // ── Ledger, on Kyoto ────────────────────────────────────────────
     const participantIds = [newId(), newId(), newId()];
     await tx.insert(tripParticipants).values([
-      { id: participantIds[0]!, tripId: ID.kyoto, userId: ID.arjun, displayName: 'Arjun', avatarTone: 'sienna', createdBy: ID.arjun },
-      { id: participantIds[1]!, tripId: ID.kyoto, userId: ID.priya, displayName: 'Priya', avatarTone: 'teal', createdBy: ID.arjun },
-      // A placeholder — the FR-SPLIT-01 case, someone with no account.
-      { id: participantIds[2]!, tripId: ID.kyoto, userId: null, displayName: 'Devon (no account)', avatarTone: 'forest', createdBy: ID.arjun },
+      { id: participantIds[0]!, tripId: ID.kyoto, userId: ownerId, displayName: 'Arjun', avatarTone: 'sienna', createdBy: ownerId },
+      { id: participantIds[1]!, tripId: ID.kyoto, userId: ID.priya, displayName: 'Priya', avatarTone: 'teal', createdBy: ownerId },
+      // A placeholder — the FR-SPLIT-01 case, someone with no account who still
+      // appears in splits and balances.
+      { id: participantIds[2]!, tripId: ID.kyoto, userId: null, displayName: 'Devon (no account)', avatarTone: 'forest', createdBy: ownerId },
     ]);
 
     const rate = parseRate(JPY_TO_INR);
@@ -278,10 +333,10 @@ async function seed(): Promise<void> {
         fxRateToBase: JPY_TO_INR,
         fxRateSource: 'AUTO',
         amountBaseMinor,
-        spentAt: new Date('2026-05-19T12:00:00Z'),
+        spentAt: new Date('2027-05-19T12:00:00Z'),
         category: item.category as never,
         splitMethod: 'EQUAL',
-        createdBy: ID.arjun,
+        createdBy: ownerId,
       });
 
       await tx.insert(expensePayments).values({
@@ -302,43 +357,41 @@ async function seed(): Promise<void> {
       );
     }
 
-    // ── A second trip, for dashboard/list testing ───────────────────
-    const tokyoVariantId = newId();
-    await tx.insert(trips).values({
-      id: ID.tokyo,
-      ownerId: ID.arjun,
-      folderId: ID.japanFolder,
-      title: 'Tokyo Detour',
-      subtitle: 'Shibuya, Yanaka, jazz kissas',
-      destination: 'Tokyo, Japan',
-      startDate: '2026-05-25',
-      endDate: '2026-05-28',
-      status: 'PLANNING',
-      baseCurrency: 'INR',
-      mainVariantId: tokyoVariantId,
-    });
-    await tx.insert(variants).values({
-      id: tokyoVariantId, tripId: ID.tokyo, name: 'Neon & night', isMain: true, createdBy: ID.arjun,
-    });
-    await tx.insert(tripMembers).values({ tripId: ID.tokyo, userId: ID.arjun, role: 'OWNER' });
-    await tx.insert(tripParticipants).values({
-      id: newId(), tripId: ID.tokyo, userId: ID.arjun, displayName: 'Arjun', createdBy: ID.arjun,
-    });
+    // Participants on the other trips, so the ledger is reachable everywhere.
+    await tx.insert(tripParticipants).values(
+      TRIPS.filter((trip) => trip.id !== ID.kyoto).map((trip) => ({
+        id: newId(),
+        tripId: trip.id,
+        userId: ownerId,
+        displayName: 'Arjun',
+        avatarTone: 'sienna',
+        createdBy: ownerId,
+      })),
+    );
+
+    void kyotoVariantId;
   });
 
-  const blockCount = KYOTO_DAYS.reduce((sum, day) => sum + day.blocks.length, 0);
   logger.info(
     {
-      users: 3,
-      trips: 2,
-      days: KYOTO_DAYS.length,
-      blocks: blockCount,
+      users: USERS.length,
+      folders: FOLDERS.length,
+      trips: TRIPS.length,
+      days: dayTotal,
+      blocks: blockTotal,
       expenses: KYOTO_EXPENSES.length,
       kyotoTripId: ID.kyoto,
-      arjunUserId: ID.arjun,
+      ownerId,
+      ownedByRealAccount: claimed,
     },
     'seed complete',
   );
+
+  if (!claimed) {
+    logger.info(
+      'set SEED_OWNER_ID=<your supabase user id> to own this data from a real sign-in',
+    );
+  }
   logger.info('run `npm run token:dev` for a token to paste into /docs');
 }
 
